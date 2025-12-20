@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+{% set active_page = 'stats' %}
+
+{% block content %}
+<div class="space-y-8">
+    <h1 class="text-3xl font-bold">Statistics</h1>
+
+    <!-- Totals -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
+        <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+            <div class="text-gray-400 text-sm font-medium">Files Scanned</div>
+            <div class="mt-2 text-3xl font-bold">{{ stats.files_scanned | format_number }}</div>
+            <div class="text-sm text-gray-500">All time</div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+            <div class="text-gray-400 text-sm font-medium">Files Hashed</div>
+            <div class="mt-2 text-3xl font-bold">{{ stats.files_hashed | format_number }}</div>
+            <div class="text-sm text-gray-500">{{ stats.bytes_hashed | format_bytes }} processed</div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+            <div class="text-gray-400 text-sm font-medium">Files Uploaded</div>
+            <div class="mt-2 text-3xl font-bold text-green-400">{{ stats.files_uploaded | format_number }}</div>
+            <div class="text-sm text-gray-500">{{ stats.bytes_uploaded | format_bytes }} sent</div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+            <div class="text-gray-400 text-sm font-medium">Errors</div>
+            <div class="mt-2 text-3xl font-bold text-red-400">{{ stats.files_errored | format_number }}</div>
+            <div class="text-sm text-gray-500">
+                <a href="/files?status=error" class="hover:underline">View errors</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Data Movement Chart -->
+    <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+        <h2 class="text-xl font-semibold mb-4">Data Movement (Last 7 Days)</h2>
+
+        <!-- Simple ASCII-style bar chart -->
+        <div class="space-y-2" hx-get="/api/stats/chart-data" hx-trigger="load" hx-swap="innerHTML">
+            {% for day in last_7_days %}
+            <div class="flex items-center space-x-4">
+                <span class="w-20 text-sm text-gray-400">{{ day.date | format_date }}</span>
+                <div class="flex-1 flex items-center space-x-2">
+                    <!-- Reads bar (blue) -->
+                    <div class="h-6 bg-blue-600 rounded" style="width: {{ day.read_percent }}%"
+                        title="Read: {{ day.bytes_read | format_bytes }}"></div>
+                    <!-- Writes bar (green) -->
+                    <div class="h-6 bg-green-600 rounded" style="width: {{ day.write_percent }}%"
+                        title="Uploaded: {{ day.bytes_uploaded | format_bytes }}"></div>
+                </div>
+                <span class="w-24 text-sm text-right text-gray-400">{{ day.bytes_uploaded | format_bytes }}</span>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="flex items-center space-x-4 mt-4 text-sm">
+            <span class="flex items-center">
+                <span class="w-3 h-3 bg-blue-600 rounded mr-2"></span>
+                Data Read
+            </span>
+            <span class="flex items-center">
+                <span class="w-3 h-3 bg-green-600 rounded mr-2"></span>
+                Data Uploaded
+            </span>
+        </div>
+    </div>
+
+    <!-- Detailed Table -->
+    <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+        <h2 class="text-xl font-semibold mb-4">Daily Breakdown</h2>
+
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="text-left text-gray-400 border-b border-gray-700">
+                        <th class="pb-3 font-medium">Date</th>
+                        <th class="pb-3 font-medium text-right">Scanned</th>
+                        <th class="pb-3 font-medium text-right">Hashed</th>
+                        <th class="pb-3 font-medium text-right">Uploaded</th>
+                        <th class="pb-3 font-medium text-right">Skipped</th>
+                        <th class="pb-3 font-medium text-right">Errors</th>
+                        <th class="pb-3 font-medium text-right">Data In</th>
+                        <th class="pb-3 font-medium text-right">Data Out</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-700">
+                    {% for day in last_7_days %}
+                    <tr class="hover:bg-gray-750">
+                        <td class="py-3">{{ day.date }}</td>
+                        <td class="py-3 text-right">{{ day.files_scanned | format_number }}</td>
+                        <td class="py-3 text-right">{{ day.files_hashed | format_number }}</td>
+                        <td class="py-3 text-right text-green-400">{{ day.files_uploaded | format_number }}</td>
+                        <td class="py-3 text-right text-gray-500">{{ day.files_skipped | format_number }}</td>
+                        <td class="py-3 text-right text-red-400">{{ day.files_errored | format_number }}</td>
+                        <td class="py-3 text-right">{{ day.bytes_read | format_bytes }}</td>
+                        <td class="py-3 text-right text-green-400">{{ day.bytes_uploaded | format_bytes }} ↑</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="8" class="py-8 text-center text-gray-500">
+                            No statistics recorded yet. Run a sync to generate data.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+                {% if last_7_days %}
+                <tfoot class="border-t border-gray-600">
+                    <tr class="font-medium">
+                        <td class="pt-3">Total (7 days)</td>
+                        <td class="pt-3 text-right">{{ totals.files_scanned | format_number }}</td>
+                        <td class="pt-3 text-right">{{ totals.files_hashed | format_number }}</td>
+                        <td class="pt-3 text-right text-green-400">{{ totals.files_uploaded | format_number }}</td>
+                        <td class="pt-3 text-right text-gray-500">{{ totals.files_skipped | format_number }}</td>
+                        <td class="pt-3 text-right text-red-400">{{ totals.files_errored | format_number }}</td>
+                        <td class="pt-3 text-right">{{ totals.bytes_read | format_bytes }}</td>
+                        <td class="pt-3 text-right text-green-400">{{ totals.bytes_uploaded | format_bytes }}</td>
+                    </tr>
+                </tfoot>
+                {% endif %}
+            </table>
+        </div>
+    </div>
+
+    <!-- Database Stats -->
+    <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+        <h2 class="text-xl font-semibold mb-4">Database Statistics</h2>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div class="bg-gray-900 rounded p-4">
+                <div class="text-gray-400 text-sm">Hash DB Size</div>
+                <div class="text-2xl font-bold">{{ db.size | format_bytes }}</div>
+            </div>
+            <div class="bg-gray-900 rounded p-4">
+                <div class="text-gray-400 text-sm">Total Records</div>
+                <div class="text-2xl font-bold">{{ db.total_files | format_number }}</div>
+            </div>
+            <div class="bg-gray-900 rounded p-4">
+                <div class="text-gray-400 text-sm">Unique Hashes</div>
+                <div class="text-2xl font-bold">{{ db.unique_hashes | format_number }}</div>
+            </div>
+            <div class="bg-gray-900 rounded p-4">
+                <div class="text-gray-400 text-sm">Duplicate Files</div>
+                <div class="text-2xl font-bold text-yellow-400">{{ db.duplicates | format_number }}</div>
+            </div>
+        </div>
+
+        <!-- Storage breakdown -->
+        <div class="mt-6">
+            <h3 class="text-lg font-medium mb-3">Storage Breakdown</h3>
+            <div class="space-y-2">
+                <div class="flex items-center">
+                    <span class="w-32 text-sm text-gray-400">Uploaded</span>
+                    <div class="flex-1 bg-gray-700 rounded-full h-4 mx-4">
+                        <div class="bg-green-600 h-4 rounded-full" style="width: {{ db.uploaded_percent }}%"></div>
+                    </div>
+                    <span class="text-sm">{{ db.uploaded_bytes | format_bytes }}</span>
+                </div>
+                <div class="flex items-center">
+                    <span class="w-32 text-sm text-gray-400">Pending</span>
+                    <div class="flex-1 bg-gray-700 rounded-full h-4 mx-4">
+                        <div class="bg-blue-600 h-4 rounded-full" style="width: {{ db.pending_percent }}%"></div>
+                    </div>
+                    <span class="text-sm">{{ db.pending_bytes | format_bytes }}</span>
+                </div>
+                <div class="flex items-center">
+                    <span class="w-32 text-sm text-gray-400">Errors</span>
+                    <div class="flex-1 bg-gray-700 rounded-full h-4 mx-4">
+                        <div class="bg-red-600 h-4 rounded-full" style="width: {{ db.error_percent }}%"></div>
+                    </div>
+                    <span class="text-sm">{{ db.error_bytes | format_bytes }}</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Per-directory stats -->
+        <div class="mt-6">
+            <h3 class="text-lg font-medium mb-3">By Directory</h3>
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="text-left text-gray-400 border-b border-gray-700">
+                        <th class="pb-2">Directory</th>
+                        <th class="pb-2 text-right">Files</th>
+                        <th class="pb-2 text-right">Size</th>
+                        <th class="pb-2 text-right">Uploaded</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-700">
+                    {% for dir in directory_stats %}
+                    <tr>
+                        <td class="py-2 font-mono text-xs">{{ dir.path }}</td>
+                        <td class="py-2 text-right">{{ dir.file_count | format_number }}</td>
+                        <td class="py-2 text-right">{{ dir.total_bytes | format_bytes }}</td>
+                        <td class="py-2 text-right">
+                            <span class="{% if dir.upload_percent == 100 %}text-green-400{% endif %}">
+                                {{ dir.upload_percent | round(1) }}%
+                            </span>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Performance Stats -->
+    <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+        <h2 class="text-xl font-semibold mb-4">Performance</h2>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="bg-gray-900 rounded p-4">
+                <div class="text-gray-400 text-sm">Avg Scan Speed</div>
+                <div class="text-2xl font-bold">{{ perf.scan_speed | format_number }} files/sec</div>
+            </div>
+            <div class="bg-gray-900 rounded p-4">
+                <div class="text-gray-400 text-sm">Avg Hash Speed</div>
+                <div class="text-2xl font-bold">{{ perf.hash_speed | format_bytes }}/sec</div>
+            </div>
+            <div class="bg-gray-900 rounded p-4">
+                <div class="text-gray-400 text-sm">Avg Upload Speed</div>
+                <div class="text-2xl font-bold">{{ perf.upload_speed | format_bytes }}/sec</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

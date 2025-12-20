@@ -1,0 +1,118 @@
+<!-- Real-time Progress Chart (for active batches) -->
+<div class="relative h-32">
+    <canvas id="progressChart"></canvas>
+</div>
+
+<script>
+(function() {
+    const ctx = document.getElementById('progressChart').getContext('2d');
+
+    // Real-time data buffer (sliding window)
+    const MAX_POINTS = 60;  // Last 60 seconds
+    let uploadSpeeds = [];
+    let timestamps = [];
+
+    const config = {
+        type: 'line',
+        data: {
+            labels: timestamps,
+            datasets: [{
+                label: 'Upload Speed',
+                data: uploadSpeeds,
+                borderColor: 'rgb(34, 197, 94)',
+                backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                fill: true,
+                tension: 0.4,
+                pointRadius: 0,
+                borderWidth: 2,
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: {
+                duration: 0  // Disable animation for real-time
+            },
+            plugins: {
+                legend: {
+                    display: false,
+                },
+                tooltip: {
+                    enabled: true,
+                    callbacks: {
+                        label: function(context) {
+                            return context.parsed.y.toFixed(2) + ' MB/s';
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    display: false,
+                },
+                y: {
+                    beginAtZero: true,
+                    grid: {
+                        color: 'rgba(75, 85, 99, 0.2)',
+                    },
+                    ticks: {
+                        color: 'rgb(156, 163, 175)',
+                        callback: function(value) {
+                            return value.toFixed(1) + ' MB/s';
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    const chart = new Chart(ctx, config);
+
+    // Update function - called by HTMX or WebSocket
+    window.updateProgressChart = function(speedMbps) {
+        const now = new Date().toLocaleTimeString();
+
+        uploadSpeeds.push(speedMbps);
+        timestamps.push(now);
+
+        // Keep sliding window
+        if (uploadSpeeds.length > MAX_POINTS) {
+            uploadSpeeds.shift();
+            timestamps.shift();
+        }
+
+        chart.update('none');  // Update without animation
+    };
+
+    // Poll for updates (fallback if no WebSocket)
+    async function pollProgress() {
+        try {
+            const response = await fetch('/api/batches/active/speed');
+            if (response.ok) {
+                const data = await response.json();
+                if (data.speed_mbps !== undefined) {
+                    window.updateProgressChart(data.speed_mbps);
+                }
+            }
+        } catch (e) {
+            console.debug('Progress poll failed:', e);
+        }
+    }
+
+    // Poll every second when batch is active
+    const pollInterval = setInterval(pollProgress, 1000);
+
+    // Cleanup when element is removed
+    const observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            mutation.removedNodes.forEach(function(node) {
+                if (node.id === 'progressChart' || node.contains && node.contains(document.getElementById('progressChart'))) {
+                    clearInterval(pollInterval);
+                    observer.disconnect();
+                }
+            });
+        });
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+})();
+</script>
