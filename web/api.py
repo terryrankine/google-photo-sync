@@ -19,6 +19,21 @@ from src.sync import get_orchestrator
 
 router = APIRouter()
 
+# Build info - set during Docker build or deployment
+BUILD_VERSION = os.getenv('BUILD_VERSION', 'dev')
+BUILD_COMMIT = os.getenv('BUILD_COMMIT', 'unknown')
+BUILD_TIME = os.getenv('BUILD_TIME', 'unknown')
+
+
+@router.get("/version")
+async def get_version():
+    """Get application version and build info."""
+    return {
+        "version": BUILD_VERSION,
+        "commit": BUILD_COMMIT,
+        "build_time": BUILD_TIME,
+    }
+
 
 # Request/Response Models
 class ConfigUpdate(BaseModel):

@@ -35,6 +35,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Runtime stage
 FROM python:3.11-slim
 
+# Build arguments for version info
+ARG BUILD_VERSION=dev
+ARG BUILD_COMMIT=unknown
+ARG BUILD_TIME=unknown
+
 WORKDIR /app
 
 # Install runtime dependencies (sqlite3 for debugging)
@@ -70,7 +75,10 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     CONFIG_DIR=/config \
     DATA_DIR=/data \
-    PHOTOS_DIR=/photos
+    PHOTOS_DIR=/photos \
+    BUILD_VERSION=${BUILD_VERSION} \
+    BUILD_COMMIT=${BUILD_COMMIT} \
+    BUILD_TIME=${BUILD_TIME}
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

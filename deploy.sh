@@ -58,7 +58,20 @@ tar --exclude='.git' \
     --exclude='*.db-shm' \
     -czf - . | $SSH_CMD "$NAS_HOST" "cd $NAS_PATH && tar -xzf -"
 
-echo "Rebuilding container..."
-$SSH_CMD "$NAS_HOST" "cd $NAS_PATH && /usr/local/bin/docker-compose build --no-cache && /usr/local/bin/docker-compose up -d"
+# Get build info
+BUILD_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+BUILD_VERSION="1.0.0-${BUILD_COMMIT}"
+
+echo "Build info: $BUILD_VERSION ($BUILD_COMMIT) at $BUILD_TIME"
+echo "Rebuilding container (with layer caching)..."
+
+# Build with version info - uses layer caching for faster builds
+$SSH_CMD "$NAS_HOST" "cd $NAS_PATH && \
+    /usr/local/bin/docker-compose build \
+        --build-arg BUILD_VERSION=$BUILD_VERSION \
+        --build-arg BUILD_COMMIT=$BUILD_COMMIT \
+        --build-arg BUILD_TIME=$BUILD_TIME && \
+    /usr/local/bin/docker-compose up -d"
 
 echo "Done."

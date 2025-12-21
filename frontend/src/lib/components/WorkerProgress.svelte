@@ -4,11 +4,14 @@
   export let totalThroughput = 0;
   export let totalFilesPerSec = 0;
 
+  // HSL color interpolation: red (0) -> yellow (60) -> green (120)
+  // Maps 0-100% to hue 0-120 for a smooth spectrum
   function getProgressColor(percent) {
-    if (percent >= 75) return 'bg-green-500';
-    if (percent >= 50) return 'bg-blue-500';
-    if (percent >= 25) return 'bg-yellow-500';
-    return 'bg-gray-500';
+    // Clamp to 0-100
+    const p = Math.max(0, Math.min(100, percent));
+    // Map percent to hue: 0% = red (0°), 50% = yellow (60°), 100% = green (120°)
+    const hue = Math.round((p / 100) * 120);
+    return `hsl(${hue}, 70%, 45%)`;
   }
 
   function formatSpeed(mbps) {
@@ -57,8 +60,8 @@
           {#if !worker.idle}
             <div class="w-full bg-gray-600 rounded-full h-2 mb-1">
               <div
-                class="{getProgressColor(worker.progress_percent)} h-2 rounded-full transition-all duration-300"
-                style="width: {worker.progress_percent}%"
+                class="h-2 rounded-full transition-all duration-300"
+                style="width: {worker.progress_percent}%; background-color: {getProgressColor(worker.progress_percent)}"
               ></div>
             </div>
             <div class="flex justify-between text-xs text-gray-400">
