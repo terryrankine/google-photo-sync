@@ -413,8 +413,8 @@ class UploadTokenBatcher:
     """
 
     BATCH_SIZE = 50
-    FLUSH_INTERVAL = 5.0  # Max wait before flushing partial batch
-    MIN_BATCH_SIZE = 20   # Flush early if we hit this and waited 2+ seconds
+    FLUSH_INTERVAL = 15.0  # Max wait before flushing partial batch (increased for larger batches)
+    MIN_BATCH_SIZE = 25    # Flush early if we hit this and waited 5+ seconds
 
     def __init__(self, uploader: 'GooglePhotosUploader', db, task_queue=None):
         self.uploader = uploader
@@ -507,12 +507,12 @@ class UploadTokenBatcher:
 
             # Flush if:
             # 1. Batch is full (50)
-            # 2. Max wait exceeded (5 sec)
-            # 3. Decent batch size (20+) and waited 2+ seconds
+            # 2. Max wait exceeded (15 sec)
+            # 3. Decent batch size (25+) and waited 5+ seconds
             should_flush = (
                 len(self._pending) >= self.BATCH_SIZE or
                 batch_age >= self.FLUSH_INTERVAL or
-                (len(self._pending) >= self.MIN_BATCH_SIZE and batch_age >= 2.0)
+                (len(self._pending) >= self.MIN_BATCH_SIZE and batch_age >= 5.0)
             )
 
             if should_flush:

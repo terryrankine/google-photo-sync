@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Google Photos Sync Tool - A NAS-native application for syncing photos to Google Photos with intelligent duplicate detection. Built with Python 3.11 async/await, FastAPI backend, SQLite database, and HTMX-powered web dashboard.
+Google Photos Sync Tool - A NAS-native application for syncing photos to Google Photos with intelligent duplicate detection. Built with Python 3.11 async/await, FastAPI backend, SQLite database, and SvelteKit web dashboard.
 
 ## Development Commands
 
@@ -60,11 +60,21 @@ docker-compose -f docker-compose.windows.yml up -d
 
 ### Frontend
 
-- `frontend/` - Svelte 4 + Vite + Tailwind CSS
-- Builds to `web/static/` served by FastAPI
-- Uses `@tanstack/svelte-query` for data fetching with caching
-- Uses `@tanstack/svelte-table` for server-side paginated tables
-- Chart.js for metrics visualization
+- `frontend/` - Svelte 5 + SvelteKit + Tailwind CSS
+- Uses `adapter-static` to build SPA output to `web/static/` served by FastAPI
+- File-based routing: `src/routes/` contains page components (+page.svelte)
+- Uses Svelte 5 runes syntax: `$state()`, `$derived()`, `$effect()`
+- Uses `@tanstack/svelte-query` v6 for data fetching with caching
+- LayerChart (D3-based) for metrics visualization
+
+#### Frontend Development
+
+```bash
+cd frontend
+npm install
+npm run dev      # Dev server at localhost:5173
+npm run build    # Build to ../web/static/
+```
 
 ### Upload Batching
 
@@ -109,7 +119,7 @@ Uses pytest with pytest-asyncio. Test fixtures in `tests/conftest.py` provide:
 - `DATA_DIR` - SQLite database directory (default: /data)
 - `PHOTOS_DIR` - Source photos root (default: /photos)
 
-## Development Status (2025-12-20)
+## Development Status (2025-12-21)
 
 ### Working
 - Full sync pipeline: SCAN → HASH → UPLOAD
@@ -118,6 +128,7 @@ Uses pytest with pytest-asyncio. Test fixtures in `tests/conftest.py` provide:
 - Settings page with source directory management
 - Google Photos upload with token refresh
 - All SQL queries use parameterized queries (no SQL injection)
+- Frontend migrated to Svelte 5 + SvelteKit (2025-12-21)
 
 ### Known Limitations
 - Docker Desktop on Windows cannot mount network drives (Y:\)

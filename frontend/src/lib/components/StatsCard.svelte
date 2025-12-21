@@ -1,8 +1,5 @@
 <script>
-  export let title = '';
-  export let value = 0;
-  export let subtitle = '';
-  export let color = 'blue';
+  let { title = '', value = 0, subtitle = '', color = 'blue' } = $props();
 </script>
 
 <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">

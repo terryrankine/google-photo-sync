@@ -1,17 +1,17 @@
 <script>
-  export let queue = {};
+  let { queue = {} } = $props();
 
   // Defensive defaults for nested properties
-  $: hashQueue = {
+  let hashQueue = $derived({
     pending_batches: queue?.hash?.pending_batches ?? 0,
     running_batches: queue?.hash?.running_batches ?? 0,
     pending_files: queue?.hash?.pending_files ?? 0
-  };
-  $: uploadQueue = {
+  });
+  let uploadQueue = $derived({
     pending_batches: queue?.upload?.pending_batches ?? 0,
     running_batches: queue?.upload?.running_batches ?? 0,
     pending_files: queue?.upload?.pending_files ?? 0
-  };
+  });
 
   function formatNumber(n) {
     if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;

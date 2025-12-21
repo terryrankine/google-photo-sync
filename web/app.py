@@ -158,12 +158,12 @@ async def health():
     return {"status": "healthy"}
 
 
-# Serve Svelte SPA - mount assets first, then catch-all for SPA routing
+# Serve Svelte SPA - mount _app first, then catch-all for SPA routing
 if STATIC_DIR.exists():
-    # Mount the assets subdirectory for JS/CSS bundles
-    assets_dir = STATIC_DIR / "assets"
-    if assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+    # Mount the _app subdirectory for SvelteKit JS/CSS bundles
+    app_dir = STATIC_DIR / "_app"
+    if app_dir.exists():
+        app.mount("/_app", StaticFiles(directory=app_dir), name="sveltekit_app")
 
 
 @app.get("/{path:path}")

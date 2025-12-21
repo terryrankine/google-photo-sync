@@ -1,8 +1,5 @@
 <script>
-  export let workers = [];
-  export let title = "Workers";
-  export let totalThroughput = 0;
-  export let totalFilesPerSec = 0;
+  let { workers = [], title = "Workers", totalThroughput = 0, totalFilesPerSec = 0 } = $props();
 
   // HSL color interpolation: red (0) -> yellow (60) -> green (120)
   // Maps 0-100% to hue 0-120 for a smooth spectrum
@@ -46,7 +43,7 @@
                 <span class="text-gray-500 text-xs ml-2">Idle</span>
               {:else}
                 <span class="text-gray-400 text-xs ml-2">
-                  Batch #{worker.batch_number}
+                  Batch #{worker.batch_id}
                 </span>
               {/if}
             </span>

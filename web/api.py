@@ -152,6 +152,66 @@ async def get_db_size(request: Request):
 
 
 # Stats endpoints
+async def _get_chart_data(db, intervals: int = 20, minutes_per_interval: int = 5):
+    """Helper function to get chart data for rolling time windows."""
+    labels = []
+    uploaded = []
+    hashed = []
+    errors = []
+
+    for i in range(intervals - 1, -1, -1):
+        start_offset = i * minutes_per_interval
+        end_offset = (i + 1) * minutes_per_interval
+        start_param = f'-{end_offset} minutes'
+        end_param = f'-{start_offset} minutes'
+
+        # Uploads in this window
+        async with db.execute("""
+            SELECT COUNT(*) as count
+            FROM files
+            WHERE uploaded_at IS NOT NULL
+              AND uploaded_at >= datetime('now', ?)
+              AND uploaded_at < datetime('now', ?)
+        """, (start_param, end_param)) as cursor:
+            row = await cursor.fetchone()
+            uploaded.append(row['count'] if row else 0)
+
+        # Hashed files in this window
+        async with db.execute("""
+            SELECT COUNT(*) as count
+            FROM files
+            WHERE sha256 IS NOT NULL
+              AND created_at >= datetime('now', ?)
+              AND created_at < datetime('now', ?)
+        """, (start_param, end_param)) as cursor:
+            row = await cursor.fetchone()
+            hashed.append(row['count'] if row else 0)
+
+        # Errors in this window
+        async with db.execute("""
+            SELECT COUNT(*) as count
+            FROM files
+            WHERE status = 'error'
+              AND updated_at >= datetime('now', ?)
+              AND updated_at < datetime('now', ?)
+        """, (start_param, end_param)) as cursor:
+            row = await cursor.fetchone()
+            errors.append(row['count'] if row else 0)
+
+        if start_offset == 0:
+            labels.append('now')
+        else:
+            labels.append(f'-{start_offset}m')
+
+    return {
+        "labels": labels,
+        "uploaded": uploaded,
+        "hashed": hashed,
+        "errors": errors,
+        "interval_minutes": minutes_per_interval,
+    }
+
+
 @router.get("/stats/cards")
 async def get_stats_cards(request: Request):
     """Get stats for dashboard cards."""
@@ -760,9 +820,88 @@ async def list_files(
     }
 
 
+@router.get("/files/duplicates")
+async def get_duplicate_files(request: Request, page: int = 1, limit: int = 50):
+    """Get files that have duplicate hashes (same content, different paths).
+
+    Returns groups of files sharing the same sha256 hash.
+    """
+    db = request.app.state.db
+    offset = (page - 1) * limit
+
+    # Find hashes that appear more than once
+    async with db.execute("""
+        SELECT sha256, COUNT(*) as count, SUM(size) as total_size
+        FROM files
+        WHERE sha256 IS NOT NULL
+        GROUP BY sha256
+        HAVING COUNT(*) > 1
+        ORDER BY count DESC, total_size DESC
+        LIMIT ? OFFSET ?
+    """, (limit, offset)) as cursor:
+        dup_hashes = [dict(row) async for row in cursor]
+
+    # Get total count of duplicate groups
+    async with db.execute("""
+        SELECT COUNT(*) as total FROM (
+            SELECT sha256 FROM files WHERE sha256 IS NOT NULL
+            GROUP BY sha256 HAVING COUNT(*) > 1
+        )
+    """) as cursor:
+        row = await cursor.fetchone()
+        total_groups = row['total'] if row else 0
+
+    # For each duplicate hash, get the files
+    result = []
+    for dup in dup_hashes:
+        async with db.execute("""
+            SELECT id, source_name, relative_path, filename, size, status, uploaded_at
+            FROM files
+            WHERE sha256 = ?
+            ORDER BY uploaded_at DESC NULLS LAST, relative_path
+        """, (dup['sha256'],)) as cursor:
+            files = [dict(row) async for row in cursor]
+
+        result.append({
+            "sha256": dup['sha256'][:16] + "...",  # Truncate for display
+            "count": dup['count'],
+            "size_each": files[0]['size'] if files else 0,
+            "wasted_bytes": files[0]['size'] * (dup['count'] - 1) if files else 0,
+            "files": files
+        })
+
+    # Calculate summary stats
+    async with db.execute("""
+        SELECT
+            COUNT(*) as duplicate_file_count,
+            SUM(size) as duplicate_bytes
+        FROM files
+        WHERE sha256 IN (
+            SELECT sha256 FROM files WHERE sha256 IS NOT NULL
+            GROUP BY sha256 HAVING COUNT(*) > 1
+        )
+    """) as cursor:
+        row = await cursor.fetchone()
+        total_dup_files = row['duplicate_file_count'] if row else 0
+        total_dup_bytes = row['duplicate_bytes'] if row else 0
+
+    return {
+        "groups": result,
+        "page": page,
+        "limit": limit,
+        "total_groups": total_groups,
+        "total_duplicate_files": total_dup_files,
+        "total_duplicate_bytes": total_dup_bytes,
+        "pages": (total_groups + limit - 1) // limit if total_groups else 0
+    }
+
+
 @router.get("/files/{file_id}/preview")
-async def get_file_preview(request: Request, file_id: int):
-    """Serve image file for preview."""
+async def get_file_preview(request: Request, file_id: int, max_size: int = 400):
+    """Serve image thumbnail for preview. max_size controls the thumbnail dimension."""
+    from PIL import Image
+    import io
+
     db = request.app.state.db
 
     async with db.execute("""
@@ -795,6 +934,37 @@ async def get_file_preview(request: Request, file_id: int):
 
     # Determine media type
     ext = row['extension'].lower() if row['extension'] else ''
+
+    # For images, generate a thumbnail
+    image_exts = {'jpg', 'jpeg', 'png', 'gif', 'webp'}
+    if ext in image_exts:
+        try:
+            # Clamp max_size between 50 and 1200
+            max_size = max(50, min(1200, max_size))
+
+            with Image.open(file_path) as img:
+                # Convert to RGB if necessary (for PNG with alpha, etc.)
+                if img.mode in ('RGBA', 'P'):
+                    img = img.convert('RGB')
+
+                # Create thumbnail (maintains aspect ratio)
+                img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+
+                # Save to bytes buffer
+                buffer = io.BytesIO()
+                img.save(buffer, format='JPEG', quality=85, optimize=True)
+                buffer.seek(0)
+
+                return Response(
+                    content=buffer.getvalue(),
+                    media_type='image/jpeg',
+                    headers={'Cache-Control': 'public, max-age=86400'}
+                )
+        except Exception as e:
+            # Fall back to serving original file if thumbnail fails
+            logger.warning(f"Thumbnail generation failed for {file_path}: {e}")
+
+    # For videos or failed thumbnails, serve original
     media_types = {
         'jpg': 'image/jpeg',
         'jpeg': 'image/jpeg',

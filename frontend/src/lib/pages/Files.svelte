@@ -1,15 +1,11 @@
 <script>
-  import { writable } from 'svelte/store';
   import { createQuery } from '@tanstack/svelte-query';
-  import {
-    createSvelteTable,
-    getCoreRowModel,
-    flexRender,
-  } from '@tanstack/svelte-table';
 
   // Pagination & sorting state
-  let pagination = { pageIndex: 0, pageSize: 50 };
-  let sorting = [{ id: 'relative_path', desc: false }];
+  let pageIndex = 0;
+  let pageSize = 50;
+  let sortBy = 'relative_path';
+  let sortDesc = false;
   let globalFilter = '';
   let statusFilter = '';
   let searchTimeout;
@@ -19,16 +15,16 @@
 
   // Build query params from state
   $: queryParams = {
-    page: pagination.pageIndex + 1,
-    limit: pagination.pageSize,
+    page: pageIndex + 1,
+    limit: pageSize,
     search: globalFilter,
     status: statusFilter,
-    sortBy: sorting[0]?.id || 'relative_path',
-    sortDir: sorting[0]?.desc ? 'desc' : 'asc',
+    sortBy,
+    sortDir: sortDesc ? 'desc' : 'asc',
   };
 
   // Fetch files with createQuery
-  const filesQuery = createQuery({
+  $: filesQuery = createQuery({
     queryKey: ['files', queryParams],
     queryFn: async () => {
       const params = new URLSearchParams({
@@ -46,6 +42,10 @@
     },
     keepPreviousData: true,
   });
+
+  $: files = $filesQuery.data?.files || [];
+  $: total = $filesQuery.data?.total || 0;
+  $: pageCount = Math.ceil(total / pageSize) || 1;
 
   // Helper functions
   function formatBytes(bytes) {
@@ -68,79 +68,42 @@
     return { text: 'Pending', class: 'text-gray-400' };
   }
 
-  // Column definitions
-  const columns = [
-    {
-      accessorKey: 'relative_path',
-      header: 'Path',
-      cell: info => info.getValue(),
-    },
-    {
-      accessorKey: 'size',
-      header: 'Size',
-      cell: info => formatBytes(info.getValue()),
-    },
-    {
-      id: 'status',
-      header: 'Status',
-      cell: info => getStatus(info.row.original),
-    },
-    {
-      accessorKey: 'mtime',
-      header: 'Modified',
-      cell: info => formatDate(info.getValue()),
-    },
-  ];
-
-  // Table state handlers
-  const setPagination = (updater) => {
-    pagination = typeof updater === 'function' ? updater(pagination) : updater;
-    options.update(old => ({ ...old, state: { ...old.state, pagination } }));
-  };
-
-  const setSorting = (updater) => {
-    sorting = typeof updater === 'function' ? updater(sorting) : updater;
-    pagination = { ...pagination, pageIndex: 0 }; // Reset to first page on sort
-    options.update(old => ({ ...old, state: { ...old.state, sorting, pagination } }));
-  };
-
-  // Table options store
-  const options = writable({
-    data: [],
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-    manualPagination: true,
-    manualSorting: true,
-    state: { pagination, sorting },
-    onPaginationChange: setPagination,
-    onSortingChange: setSorting,
-    pageCount: 0,
-  });
-
-  // Update table data when query changes
-  $: if ($filesQuery.data) {
-    options.update(old => ({
-      ...old,
-      data: $filesQuery.data.files || [],
-      pageCount: Math.ceil(($filesQuery.data.total || 0) / pagination.pageSize),
-    }));
+  // Sorting
+  function toggleSort(column) {
+    if (sortBy === column) {
+      sortDesc = !sortDesc;
+    } else {
+      sortBy = column;
+      sortDesc = false;
+    }
+    pageIndex = 0;
   }
 
-  const table = createSvelteTable(options);
+  function getSortIndicator(column) {
+    if (sortBy !== column) return '';
+    return sortDesc ? ' ▼' : ' ▲';
+  }
+
+  // Pagination
+  function previousPage() {
+    if (pageIndex > 0) pageIndex--;
+  }
+
+  function nextPage() {
+    if (pageIndex < pageCount - 1) pageIndex++;
+  }
 
   // Search with debounce
   function handleSearch(e) {
     clearTimeout(searchTimeout);
     searchTimeout = setTimeout(() => {
       globalFilter = e.target.value;
-      pagination = { ...pagination, pageIndex: 0 };
-      options.update(old => ({ ...old, state: { ...old.state, pagination } }));
+      pageIndex = 0;
     }, 300);
   }
 
   function handleFilter() {
-    pagination = { ...pagination, pageIndex: 0 };
-    options.update(old => ({ ...old, state: { ...old.state, pagination } }));
+    pageIndex = 0;
   }
 
   // Preview
@@ -194,39 +157,28 @@
   <div class="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
     <table class="w-full text-sm">
       <thead>
-        {#each $table.getHeaderGroups() as headerGroup}
-          <tr class="text-left text-gray-400 border-b border-gray-700 bg-gray-900">
-            {#each headerGroup.headers as header}
-              <th
-                class="px-4 py-3 cursor-pointer hover:text-white select-none"
-                on:click={header.column.getToggleSortingHandler()}
-              >
-                {#if !header.isPlaceholder}
-                  <svelte:component this={flexRender(header.column.columnDef.header, header.getContext())} />
-                  {#if header.column.getIsSorted() === 'asc'}
-                    ▲
-                  {:else if header.column.getIsSorted() === 'desc'}
-                    ▼
-                  {/if}
-                {/if}
-              </th>
-            {/each}
-          </tr>
-        {/each}
+        <tr class="text-left text-gray-400 border-b border-gray-700 bg-gray-900">
+          <th class="px-4 py-3 cursor-pointer hover:text-white select-none" on:click={() => toggleSort('relative_path')}>
+            Path{getSortIndicator('relative_path')}
+          </th>
+          <th class="px-4 py-3 cursor-pointer hover:text-white select-none text-right" on:click={() => toggleSort('size')}>
+            Size{getSortIndicator('size')}
+          </th>
+          <th class="px-4 py-3">Status</th>
+          <th class="px-4 py-3 cursor-pointer hover:text-white select-none text-right" on:click={() => toggleSort('mtime')}>
+            Modified{getSortIndicator('mtime')}
+          </th>
+        </tr>
       </thead>
       <tbody class="divide-y divide-gray-700">
-        {#each $table.getRowModel().rows as row}
-          <tr class="hover:bg-gray-750 cursor-pointer" on:click={() => openPreview(row.original)}>
-            {#each row.getVisibleCells() as cell}
-              <td class="px-4 py-3" class:font-mono={cell.column.id === 'relative_path'} class:text-xs={cell.column.id === 'relative_path'} class:truncate={cell.column.id === 'relative_path'} class:max-w-md={cell.column.id === 'relative_path'} class:text-right={cell.column.id === 'size'} class:text-gray-400={cell.column.id === 'size'} class:text-gray-500={cell.column.id === 'mtime'}>
-                {#if cell.column.id === 'status'}
-                  {@const status = getStatus(row.original)}
-                  <span class={status.class}>{status.text}</span>
-                {:else}
-                  <svelte:component this={flexRender(cell.column.columnDef.cell, cell.getContext())} />
-                {/if}
-              </td>
-            {/each}
+        {#each files as file}
+          <tr class="hover:bg-gray-750 cursor-pointer" on:click={() => openPreview(file)}>
+            <td class="px-4 py-3 font-mono text-xs truncate max-w-md">{file.relative_path}</td>
+            <td class="px-4 py-3 text-right text-gray-400">{formatBytes(file.size)}</td>
+            <td class="px-4 py-3">
+              <span class={getStatus(file).class}>{getStatus(file).text}</span>
+            </td>
+            <td class="px-4 py-3 text-right text-gray-500">{formatDate(file.mtime)}</td>
           </tr>
         {:else}
           <tr>
@@ -242,21 +194,21 @@
   <!-- Pagination -->
   <div class="flex justify-between items-center">
     <button
-      on:click={() => $table.previousPage()}
-      disabled={!$table.getCanPreviousPage()}
+      on:click={previousPage}
+      disabled={pageIndex === 0}
       class="px-4 py-2 bg-gray-700 rounded disabled:opacity-50 hover:bg-gray-600"
     >
       Previous
     </button>
     <span class="text-gray-400">
-      Page {pagination.pageIndex + 1} of {$table.getPageCount() || 1}
-      {#if $filesQuery.data?.total}
-        ({$filesQuery.data.total} total)
+      Page {pageIndex + 1} of {pageCount}
+      {#if total}
+        ({total} total)
       {/if}
     </span>
     <button
-      on:click={() => $table.nextPage()}
-      disabled={!$table.getCanNextPage()}
+      on:click={nextPage}
+      disabled={pageIndex >= pageCount - 1}
       class="px-4 py-2 bg-gray-700 rounded disabled:opacity-50 hover:bg-gray-600"
     >
       Next
@@ -266,9 +218,9 @@
 
 <!-- Preview Modal -->
 {#if previewFile}
-  <div class="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-50" on:click={closePreview}>
-    <div class="relative max-w-4xl max-h-[90vh] bg-gray-900 rounded-lg overflow-hidden" on:click|stopPropagation>
-      <button class="absolute top-2 right-2 z-10 p-2 bg-gray-800 rounded-full hover:bg-gray-700 text-white" on:click={closePreview}>
+  <div class="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-50" role="dialog" aria-modal="true" on:click={closePreview} on:keydown={(e) => e.key === 'Escape' && closePreview()}>
+    <div class="relative max-w-4xl max-h-[90vh] bg-gray-900 rounded-lg overflow-hidden" on:click|stopPropagation on:keydown|stopPropagation>
+      <button class="absolute top-2 right-2 z-10 p-2 bg-gray-800 rounded-full hover:bg-gray-700 text-white" on:click={closePreview} aria-label="Close preview">
         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
         </svg>
@@ -282,6 +234,7 @@
           <img src="/api/files/{previewFile.id}/preview" alt={previewFile.filename} class="max-w-full max-h-[70vh] object-contain" />
         {:else if isVideo(previewFile.extension)}
           <video src="/api/files/{previewFile.id}/preview" controls class="max-w-full max-h-[70vh]">
+            <track kind="captions" />
             Your browser does not support video playback.
           </video>
         {/if}
