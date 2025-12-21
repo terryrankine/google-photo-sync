@@ -2,11 +2,26 @@
 # Deploy to NAS - excludes stateful directories to prevent data loss
 #
 # NEVER sync: data/, config/ - these contain production database and credentials
+#
+# Configuration: Set these environment variables or create deploy.env file:
+#   NAS_HOST - SSH host (user@hostname)
+#   NAS_PATH - Remote path to deploy to
 
 set -e
 
-NAS_HOST="terry-linux@192.168.11.186"
-NAS_PATH="/volume1/docker/gphoto-sync"
+# Load config from deploy.env if it exists (not tracked in git)
+if [[ -f deploy.env ]]; then
+    source deploy.env
+fi
+
+# Validate required config
+if [[ -z "$NAS_HOST" ]]; then
+    echo "ERROR: NAS_HOST not set. Create deploy.env or set environment variable."
+    echo "Example: NAS_HOST=user@hostname"
+    exit 1
+fi
+
+NAS_PATH="${NAS_PATH:-/volume1/docker/gphoto-sync}"
 
 # Use Windows SSH if running in WSL (has the SSH keys)
 if [[ -f /mnt/c/Windows/System32/OpenSSH/ssh.exe ]]; then

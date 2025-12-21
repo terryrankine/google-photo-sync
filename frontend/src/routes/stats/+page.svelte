@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { createQuery } from '@tanstack/svelte-query';
   import LineChart from '$lib/components/LineChart.svelte';
   import { Files, CloudUpload, Fingerprint, HardDrive, Clock, Calendar } from 'lucide-svelte';
@@ -23,13 +24,32 @@
     },
   }));
 
-  // Chart data - use static placeholder until we figure out the fetch issue
-  // (Dynamic fetch to /api/stats/chart hangs in svelte-query for unknown reasons)
+  // Chart data - fetched via onMount to avoid svelte-query hanging issue
   let chartApiData = $state({
-    labels: ['-95m', '-90m', '-85m', '-80m', '-75m', '-70m', '-65m', '-60m', '-55m', '-50m', '-45m', '-40m', '-35m', '-30m', '-25m', '-20m', '-15m', '-10m', '-5m', 'now'],
-    uploaded: [100, 120, 90, 150, 200, 180, 140, 160, 110, 130, 170, 190, 85, 95, 105, 115, 125, 135, 145, 155],
-    hashed: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    errors: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    labels: [],
+    uploaded: [],
+    hashed: [],
+    errors: []
+  });
+
+  onMount(() => {
+    // Fetch chart data on mount
+    async function fetchChartData() {
+      try {
+        const res = await fetch('/api/stats/chart');
+        if (res.ok) {
+          const data = await res.json();
+          chartApiData = data;
+        }
+      } catch (e) {
+        console.error('Chart fetch error:', e);
+      }
+    }
+    fetchChartData();
+
+    // Refresh every 30 seconds
+    const interval = setInterval(fetchChartData, 30000);
+    return () => clearInterval(interval);
   });
 
   // Recent uploads with faster refresh

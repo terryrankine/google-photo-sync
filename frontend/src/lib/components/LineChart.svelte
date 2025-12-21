@@ -8,6 +8,13 @@
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
 
+  // Tooltip state
+  let tooltipVisible = $state(false);
+  let tooltipX = $state(0);
+  let tooltipY = $state(0);
+  let tooltipData = $state({ label: '', values: [] });
+  let hoveredIndex = $state(-1);
+
   // Calculate max Y value for scaling
   let maxY = $derived(() => {
     let max = 0;
@@ -98,6 +105,50 @@
 
   // Generate unique gradient IDs
   let gradientId = $derived(() => `area-gradient-${Math.random().toString(36).substr(2, 9)}`);
+
+  // Handle mouse movement over chart
+  function handleMouseMove(event) {
+    const svg = event.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    const mouseX = event.clientX - rect.left;
+    const svgWidth = rect.width;
+
+    // Convert mouse position to data index
+    const chartStartX = (padding.left / width) * svgWidth;
+    const chartEndX = ((width - padding.right) / width) * svgWidth;
+    const relativeX = (mouseX - chartStartX) / (chartEndX - chartStartX);
+
+    if (relativeX < 0 || relativeX > 1 || !data.labels?.length) {
+      tooltipVisible = false;
+      hoveredIndex = -1;
+      return;
+    }
+
+    const index = Math.round(relativeX * (data.labels.length - 1));
+    if (index < 0 || index >= data.labels.length) {
+      tooltipVisible = false;
+      hoveredIndex = -1;
+      return;
+    }
+
+    hoveredIndex = index;
+    tooltipX = event.clientX;
+    tooltipY = event.clientY;
+    tooltipData = {
+      label: data.labels[index],
+      values: data.datasets.map(ds => ({
+        name: ds.label,
+        value: ds.data?.[index] ?? 0,
+        color: ds.borderColor || '#3b82f6'
+      }))
+    };
+    tooltipVisible = true;
+  }
+
+  function handleMouseLeave() {
+    tooltipVisible = false;
+    hoveredIndex = -1;
+  }
 </script>
 
 <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
@@ -105,9 +156,17 @@
     <h2 class="text-xl font-semibold mb-4">{title}</h2>
   {/if}
 
-  <div class="overflow-x-auto">
+  <div class="overflow-x-auto relative">
     {#if data.labels?.length > 0}
-      <svg viewBox="0 0 {width} {height}" class="w-full" style="min-width: 400px; max-height: 280px;">
+      <svg
+        viewBox="0 0 {width} {height}"
+        class="w-full cursor-crosshair"
+        style="min-width: 400px; max-height: 280px;"
+        onmousemove={handleMouseMove}
+        onmouseleave={handleMouseLeave}
+        role="img"
+        aria-label="Activity chart"
+      >
         <!-- Gradient definitions for area fills -->
         <defs>
           {#each data.datasets as ds, i}
@@ -214,7 +273,48 @@
           stroke="#4b5563"
           stroke-width="1"
         />
+
+        <!-- Hover vertical line -->
+        {#if hoveredIndex >= 0 && data.labels?.length > 0}
+          <line
+            x1={padding.left + (hoveredIndex / Math.max(data.labels.length - 1, 1)) * chartWidth}
+            y1={padding.top}
+            x2={padding.left + (hoveredIndex / Math.max(data.labels.length - 1, 1)) * chartWidth}
+            y2={padding.top + chartHeight}
+            stroke="#9ca3af"
+            stroke-width="1"
+            stroke-dasharray="4,4"
+          />
+          <!-- Highlighted points -->
+          {#each data.datasets as ds, i}
+            <circle
+              cx={padding.left + (hoveredIndex / Math.max(data.labels.length - 1, 1)) * chartWidth}
+              cy={padding.top + chartHeight - ((ds.data?.[hoveredIndex] ?? 0) / maxY()) * chartHeight}
+              r="5"
+              fill={ds.borderColor || '#3b82f6'}
+              stroke="#fff"
+              stroke-width="2"
+            />
+          {/each}
+        {/if}
       </svg>
+
+      <!-- Tooltip -->
+      {#if tooltipVisible}
+        <div
+          class="fixed z-50 bg-gray-900 border border-gray-600 rounded-lg shadow-lg px-3 py-2 pointer-events-none"
+          style="left: {tooltipX + 12}px; top: {tooltipY - 10}px; transform: translateY(-50%);"
+        >
+          <div class="text-xs font-semibold text-gray-300 mb-1">{tooltipData.label}</div>
+          {#each tooltipData.values as item}
+            <div class="flex items-center gap-2 text-xs">
+              <span class="w-2 h-2 rounded-full" style="background-color: {item.color}"></span>
+              <span class="text-gray-400">{item.name}:</span>
+              <span class="font-mono text-white">{item.value}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
     {:else}
       <div class="h-48 flex items-center justify-center text-gray-500">
         No data available

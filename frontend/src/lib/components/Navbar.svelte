@@ -1,6 +1,6 @@
 <script>
   import { createQuery } from '@tanstack/svelte-query';
-  import { LayoutDashboard, ListTodo, BarChart3, Files, ScrollText, Settings, BookOpen } from 'lucide-svelte';
+  import { LayoutDashboard, ListTodo, BarChart3, Files, Copy, ScrollText, Settings, BookOpen } from 'lucide-svelte';
 
   const statusQuery = createQuery(() => ({
     queryKey: ['status'],
@@ -25,6 +25,7 @@
           <a href="/jobs" class="text-gray-300 hover:text-white hover:bg-gray-800 px-3 py-2 rounded-md text-sm font-medium flex items-center gap-1.5"><ListTodo class="w-4 h-4" />Jobs</a>
           <a href="/stats" class="text-gray-300 hover:text-white hover:bg-gray-800 px-3 py-2 rounded-md text-sm font-medium flex items-center gap-1.5"><BarChart3 class="w-4 h-4" />Statistics</a>
           <a href="/files" class="text-gray-300 hover:text-white hover:bg-gray-800 px-3 py-2 rounded-md text-sm font-medium flex items-center gap-1.5"><Files class="w-4 h-4" />Files</a>
+          <a href="/duplicates" class="text-gray-300 hover:text-white hover:bg-gray-800 px-3 py-2 rounded-md text-sm font-medium flex items-center gap-1.5"><Copy class="w-4 h-4" />Duplicates</a>
           <a href="/logs" class="text-gray-300 hover:text-white hover:bg-gray-800 px-3 py-2 rounded-md text-sm font-medium flex items-center gap-1.5"><ScrollText class="w-4 h-4" />Logs</a>
           <a href="/config" class="text-gray-300 hover:text-white hover:bg-gray-800 px-3 py-2 rounded-md text-sm font-medium flex items-center gap-1.5"><Settings class="w-4 h-4" />Settings</a>
           <a href="/setup" class="text-gray-300 hover:text-white hover:bg-gray-800 px-3 py-2 rounded-md text-sm font-medium flex items-center gap-1.5"><BookOpen class="w-4 h-4" />Setup</a>

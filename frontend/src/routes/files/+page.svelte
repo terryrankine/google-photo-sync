@@ -216,11 +216,11 @@
     onclick={closePreview}
     onkeydown={(e) => e.key === 'Escape' && closePreview()}
   >
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
     <div
       class="relative max-w-4xl max-h-[90vh] bg-gray-900 rounded-lg overflow-hidden"
       role="document"
       onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => e.stopPropagation()}
     >
       <button class="absolute top-2 right-2 z-10 p-2 bg-gray-800 rounded-full hover:bg-gray-700 text-white" onclick={closePreview} aria-label="Close preview">
         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
