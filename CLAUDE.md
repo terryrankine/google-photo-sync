@@ -57,7 +57,15 @@ docker-compose -f docker-compose.windows.yml up -d
 
 - `frontend/` - Svelte 4 + Vite + Tailwind CSS
 - Builds to `web/static/` served by FastAPI
-- Dashboard with Chart.js for metrics visualization
+- Dashboard with Chart.js for metrics visualization (dual Y-axis for hashed vs uploaded)
+- Svelte stores in `frontend/src/lib/stores/` for persistent state between page navigations
+
+### Upload Batching
+
+- `UploadTokenBatcher` accumulates upload tokens for efficient `batchCreate` calls
+- Google API limit: 50 items per batchCreate
+- Smart flush timing: waits for full batch OR 5 sec timeout OR 20+ items after 2 sec
+- Parallel upload workers (default 4) fill the batch queue
 
 ### Key Design Pattern
 
@@ -69,6 +77,7 @@ Uses `source_name + relative_path` for host-independent file identification. The
 - Cannot read media items not uploaded by this app
 - No hash/size fields in API responses
 - Videos are NOT deduplicated server-side
+- **All API uploads are ORIGINAL quality** - no storage saver option via API (Google's private API only)
 - Design relies on local SQLite tracking + Google's server-side dedup as safety net
 
 ## Error Handling Patterns

@@ -13,6 +13,7 @@
           <a href="/jobs" use:link class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium">Jobs</a>
           <a href="/stats" use:link class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium">Statistics</a>
           <a href="/files" use:link class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium">Files</a>
+          <a href="/logs" use:link class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium">Logs</a>
           <a href="/config" use:link class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium">Settings</a>
         </div>
       </div>

@@ -7,6 +7,7 @@
   import Jobs from './lib/pages/Jobs.svelte';
   import Stats from './lib/pages/Stats.svelte';
   import Files from './lib/pages/Files.svelte';
+  import Logs from './lib/pages/Logs.svelte';
   import Config from './lib/pages/Config.svelte';
 
   let status = 'idle';
@@ -41,6 +42,7 @@
       <Route path="/jobs" component={Jobs} />
       <Route path="/stats" component={Stats} />
       <Route path="/files" component={Files} />
+      <Route path="/logs" component={Logs} />
       <Route path="/config" component={Config} />
     </main>
     <footer class="border-t border-gray-800 mt-12">

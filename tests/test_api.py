@@ -3,6 +3,7 @@ Tests for REST API endpoints.
 """
 
 import pytest
+import pytest_asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 import tempfile
@@ -10,14 +11,14 @@ import shutil
 
 
 @pytest.fixture
-async def temp_dir():
+def temp_dir():
     """Create a temporary directory for test files."""
     path = Path(tempfile.mkdtemp())
     yield path
     shutil.rmtree(path, ignore_errors=True)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_db(temp_dir):
     """Create a test database with schema."""
     import aiosqlite
@@ -353,3 +354,296 @@ class TestFileSearchEndpoint:
 
         assert result['total'] == 1
         assert result['files'][0]['status'] == 'error'
+
+
+class TestErrorsEndpoint:
+    """Tests for /api/errors endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_get_errors_summary(self, test_db):
+        """Should return error summary counts."""
+        from web.api import get_errors
+        from fastapi import Request
+
+        # Insert some files with errors
+        await test_db.execute("""
+            INSERT INTO files (source_name, relative_path, filename, extension, size, mtime, status, error_message)
+            VALUES
+                ('test', 'a.jpg', 'a.jpg', 'jpg', 100, 0, 'error', 'Upload failed'),
+                ('test', 'b.jpg', 'b.jpg', 'jpg', 100, 0, 'error', 'Rate limited'),
+                ('test', 'c.jpg', 'c.jpg', 'jpg', 100, 0, 'uploaded', NULL)
+        """)
+        await test_db.commit()
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.app.state.db = test_db
+
+        result = await get_errors(mock_request)
+
+        assert result['summary']['error_files'] == 2
+        assert len(result['error_files']) == 2
+
+    @pytest.mark.asyncio
+    async def test_get_errors_with_dead_tasks(self, test_db):
+        """Should include dead tasks in error response."""
+        from web.api import get_errors
+        from fastapi import Request
+
+        # Insert a file
+        await test_db.execute("""
+            INSERT INTO files (source_name, relative_path, filename, extension, size, mtime, status)
+            VALUES ('test', 'a.jpg', 'a.jpg', 'jpg', 100, 0, 'pending')
+        """)
+        await test_db.commit()
+
+        # Get file ID
+        async with test_db.execute("SELECT id FROM files LIMIT 1") as cursor:
+            file_id = (await cursor.fetchone())['id']
+
+        # Insert a job first (required for tasks foreign key)
+        await test_db.execute("""
+            INSERT INTO jobs (source_dirs, status, current_phase)
+            VALUES ('[]', 'completed', 'done')
+        """)
+        await test_db.commit()
+
+        async with test_db.execute("SELECT id FROM jobs LIMIT 1") as cursor:
+            job_id = (await cursor.fetchone())['id']
+
+        # Insert dead tasks
+        await test_db.execute("""
+            INSERT INTO tasks (job_id, file_id, task_type, status, error_message, retry_count, max_retries)
+            VALUES (?, ?, 'upload', 'dead', 'Max retries exceeded', 3, 3)
+        """, (job_id, file_id))
+        await test_db.commit()
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.app.state.db = test_db
+
+        result = await get_errors(mock_request)
+
+        assert result['summary']['dead_tasks'] == 1
+        assert len(result['error_tasks']) == 1
+        assert result['error_tasks'][0]['status'] == 'dead'
+
+    @pytest.mark.asyncio
+    async def test_get_errors_breakdown(self, test_db):
+        """Should return error message breakdown."""
+        from web.api import get_errors
+        from fastapi import Request
+
+        await test_db.execute("""
+            INSERT INTO files (source_name, relative_path, filename, extension, size, mtime, status, error_message)
+            VALUES
+                ('test', 'a.jpg', 'a.jpg', 'jpg', 100, 0, 'error', 'Rate limited'),
+                ('test', 'b.jpg', 'b.jpg', 'jpg', 100, 0, 'error', 'Rate limited'),
+                ('test', 'c.jpg', 'c.jpg', 'jpg', 100, 0, 'error', 'File not found')
+        """)
+        await test_db.commit()
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.app.state.db = test_db
+
+        result = await get_errors(mock_request)
+
+        # Should have 2 distinct error types
+        assert len(result['error_breakdown']) == 2
+        # Rate limited should be first (count=2)
+        assert result['error_breakdown'][0]['error_message'] == 'Rate limited'
+        assert result['error_breakdown'][0]['count'] == 2
+
+
+class TestRetryDeadTaskEndpoint:
+    """Tests for POST /api/errors/retry/{task_id} endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_retry_dead_task(self, test_db):
+        """Should reset dead task to pending."""
+        from web.api import retry_dead_task
+        from fastapi import Request
+
+        # Insert a file
+        await test_db.execute("""
+            INSERT INTO files (source_name, relative_path, filename, extension, size, mtime, status)
+            VALUES ('test', 'a.jpg', 'a.jpg', 'jpg', 100, 0, 'pending')
+        """)
+        await test_db.commit()
+
+        async with test_db.execute("SELECT id FROM files LIMIT 1") as cursor:
+            file_id = (await cursor.fetchone())['id']
+
+        # Insert a job
+        await test_db.execute("""
+            INSERT INTO jobs (source_dirs, status, current_phase)
+            VALUES ('[]', 'completed', 'done')
+        """)
+        await test_db.commit()
+
+        async with test_db.execute("SELECT id FROM jobs LIMIT 1") as cursor:
+            job_id = (await cursor.fetchone())['id']
+
+        # Insert dead task
+        await test_db.execute("""
+            INSERT INTO tasks (job_id, file_id, task_type, status, error_message, retry_count, max_retries)
+            VALUES (?, ?, 'upload', 'dead', 'Max retries exceeded', 3, 3)
+        """, (job_id, file_id))
+        await test_db.commit()
+
+        async with test_db.execute("SELECT id FROM tasks LIMIT 1") as cursor:
+            task_id = (await cursor.fetchone())['id']
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.app.state.db = test_db
+
+        result = await retry_dead_task(mock_request, task_id)
+
+        assert result['status'] == 'reset'
+        assert result['task_id'] == task_id
+
+        # Verify task is now pending
+        async with test_db.execute("SELECT status, retry_count FROM tasks WHERE id = ?", (task_id,)) as cursor:
+            row = await cursor.fetchone()
+            assert row['status'] == 'pending'
+            assert row['retry_count'] == 0
+
+    @pytest.mark.asyncio
+    async def test_retry_non_dead_task_fails(self, test_db):
+        """Should reject retry of non-dead task."""
+        from web.api import retry_dead_task
+        from fastapi import Request, HTTPException
+
+        # Insert a file
+        await test_db.execute("""
+            INSERT INTO files (source_name, relative_path, filename, extension, size, mtime, status)
+            VALUES ('test', 'a.jpg', 'a.jpg', 'jpg', 100, 0, 'pending')
+        """)
+        await test_db.commit()
+
+        async with test_db.execute("SELECT id FROM files LIMIT 1") as cursor:
+            file_id = (await cursor.fetchone())['id']
+
+        # Insert a job
+        await test_db.execute("""
+            INSERT INTO jobs (source_dirs, status, current_phase)
+            VALUES ('[]', 'running', 'uploading')
+        """)
+        await test_db.commit()
+
+        async with test_db.execute("SELECT id FROM jobs LIMIT 1") as cursor:
+            job_id = (await cursor.fetchone())['id']
+
+        # Insert running task
+        await test_db.execute("""
+            INSERT INTO tasks (job_id, file_id, task_type, status)
+            VALUES (?, ?, 'upload', 'running')
+        """, (job_id, file_id))
+        await test_db.commit()
+
+        async with test_db.execute("SELECT id FROM tasks LIMIT 1") as cursor:
+            task_id = (await cursor.fetchone())['id']
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.app.state.db = test_db
+
+        with pytest.raises(HTTPException) as exc_info:
+            await retry_dead_task(mock_request, task_id)
+
+        assert exc_info.value.status_code == 400
+
+
+class TestRetryAllDeadTasksEndpoint:
+    """Tests for POST /api/errors/retry-all endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_retry_all_dead_tasks(self, test_db):
+        """Should reset all dead tasks to pending."""
+        from web.api import retry_all_dead_tasks
+        from fastapi import Request
+
+        # Insert files
+        await test_db.execute("""
+            INSERT INTO files (source_name, relative_path, filename, extension, size, mtime, status)
+            VALUES
+                ('test', 'a.jpg', 'a.jpg', 'jpg', 100, 0, 'pending'),
+                ('test', 'b.jpg', 'b.jpg', 'jpg', 100, 0, 'pending'),
+                ('test', 'c.jpg', 'c.jpg', 'jpg', 100, 0, 'pending')
+        """)
+        await test_db.commit()
+
+        file_ids = []
+        async with test_db.execute("SELECT id FROM files ORDER BY id") as cursor:
+            async for row in cursor:
+                file_ids.append(row['id'])
+
+        # Insert a job
+        await test_db.execute("""
+            INSERT INTO jobs (source_dirs, status, current_phase)
+            VALUES ('[]', 'completed', 'done')
+        """)
+        await test_db.commit()
+
+        async with test_db.execute("SELECT id FROM jobs LIMIT 1") as cursor:
+            job_id = (await cursor.fetchone())['id']
+
+        # Insert multiple dead tasks
+        await test_db.execute("""
+            INSERT INTO tasks (job_id, file_id, task_type, status, error_message)
+            VALUES
+                (?, ?, 'upload', 'dead', 'Error 1'),
+                (?, ?, 'upload', 'dead', 'Error 2'),
+                (?, ?, 'upload', 'success', NULL)
+        """, (job_id, file_ids[0], job_id, file_ids[1], job_id, file_ids[2]))
+        await test_db.commit()
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.app.state.db = test_db
+
+        result = await retry_all_dead_tasks(mock_request)
+
+        assert result['status'] == 'reset'
+        assert result['count'] == 2
+
+        # Verify all dead tasks are now pending
+        async with test_db.execute("SELECT COUNT(*) as cnt FROM tasks WHERE status = 'dead'") as cursor:
+            row = await cursor.fetchone()
+            assert row['cnt'] == 0
+
+        async with test_db.execute("SELECT COUNT(*) as cnt FROM tasks WHERE status = 'pending'") as cursor:
+            row = await cursor.fetchone()
+            assert row['cnt'] == 2
+
+
+class TestClearFileErrorsEndpoint:
+    """Tests for DELETE /api/errors/clear endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_clear_file_errors(self, test_db):
+        """Should reset error files to pending."""
+        from web.api import clear_file_errors
+        from fastapi import Request
+
+        await test_db.execute("""
+            INSERT INTO files (source_name, relative_path, filename, extension, size, mtime, status, error_message)
+            VALUES
+                ('test', 'a.jpg', 'a.jpg', 'jpg', 100, 0, 'error', 'Upload failed'),
+                ('test', 'b.jpg', 'b.jpg', 'jpg', 100, 0, 'error', 'Rate limited'),
+                ('test', 'c.jpg', 'c.jpg', 'jpg', 100, 0, 'uploaded', NULL)
+        """)
+        await test_db.commit()
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.app.state.db = test_db
+
+        result = await clear_file_errors(mock_request)
+
+        assert result['status'] == 'cleared'
+        assert result['count'] == 2
+
+        # Verify error files are now pending
+        async with test_db.execute("SELECT COUNT(*) as cnt FROM files WHERE status = 'error'") as cursor:
+            row = await cursor.fetchone()
+            assert row['cnt'] == 0
+
+        async with test_db.execute("SELECT COUNT(*) as cnt FROM files WHERE status = 'pending'") as cursor:
+            row = await cursor.fetchone()
+            assert row['cnt'] == 2

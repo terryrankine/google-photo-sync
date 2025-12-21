@@ -4,37 +4,70 @@
 
   export let data = { labels: [], datasets: [] };
   export let title = '';
+  export let dualAxis = false;
 
   let canvas;
   let chart;
 
+  // Assign datasets to axes when dualAxis is enabled
+  function prepareData(inputData) {
+    if (!dualAxis || !inputData.datasets) return inputData;
+
+    return {
+      ...inputData,
+      datasets: inputData.datasets.map((ds, i) => ({
+        ...ds,
+        yAxisID: i === 1 ? 'y1' : 'y'  // Second dataset (Hashed) on right axis
+      }))
+    };
+  }
+
   $: if (chart && data) {
-    chart.data = data;
-    chart.update();
+    chart.data = prepareData(data);
+    chart.update('none');
   }
 
   onMount(() => {
+    const scales = {
+      x: {
+        ticks: { color: '#9ca3af' },
+        grid: { color: '#374151' }
+      },
+      y: {
+        type: 'linear',
+        position: 'left',
+        ticks: { color: '#3b82f6' },  // Blue for uploaded
+        grid: { color: '#374151' },
+        title: dualAxis ? { display: true, text: 'Uploaded / Errors', color: '#9ca3af' } : {}
+      }
+    };
+
+    if (dualAxis) {
+      scales.y1 = {
+        type: 'linear',
+        position: 'right',
+        ticks: { color: '#10b981' },  // Green for hashed
+        grid: { drawOnChartArea: false },
+        title: { display: true, text: 'Hashed', color: '#9ca3af' }
+      };
+    }
+
     chart = new Chart(canvas, {
       type: 'line',
-      data,
+      data: prepareData(data),
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        interaction: {
+          mode: 'index',
+          intersect: false
+        },
         plugins: {
           legend: {
             labels: { color: '#9ca3af' }
           }
         },
-        scales: {
-          x: {
-            ticks: { color: '#9ca3af' },
-            grid: { color: '#374151' }
-          },
-          y: {
-            ticks: { color: '#9ca3af' },
-            grid: { color: '#374151' }
-          }
-        }
+        scales
       }
     });
   });

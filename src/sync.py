@@ -98,6 +98,7 @@ class SyncOrchestrator:
                 errors=progress["total_failed"]
             )
 
+            await self._record_daily_stats(job_id)
             await self._update_job_status(job_id, 'completed', 'done')
             logger.info(f"Job {job_id} resumed and completed")
 
@@ -170,6 +171,7 @@ class SyncOrchestrator:
                 parallel_uploads
             )
 
+            await self._record_daily_stats(job_id)
             await self._update_job_status(job_id, 'completed', 'done')
             logger.info(f"Job {job_id} completed")
 
@@ -285,10 +287,10 @@ class SyncOrchestrator:
             # Mark task as pipelined - worker should not call complete_task
             task.pipelined = True
 
-        # Start upload worker pool
+        # Start upload worker pool - filter to this job's batches only
         upload_workers = await self._get_config_int('parallel_uploads', 4)
         handlers = {TaskType.UPLOAD: handle_upload}
-        self._worker_pool = WorkerPool(self._task_queue, handlers, upload_workers)
+        self._worker_pool = WorkerPool(self._task_queue, handlers, upload_workers, job_id=job_id)
         await self._worker_pool.start()
 
     async def _run_pipelined_hash_upload(
@@ -306,6 +308,10 @@ class SyncOrchestrator:
         - Upload workers run concurrently with hashing
         """
         logger.info(f"Job {job_id}: {len(files_to_hash)} to hash, {len(pending_upload_ids)} pending upload")
+
+        # Set files_scanned to total files that will be processed (for accurate progress %)
+        total_to_process = len(files_to_hash) + len(pending_upload_ids)
+        await self._update_job_progress(job_id, scanned=total_to_process)
 
         # Initialize upload pipeline (task queue, uploader, worker pool)
         try:
@@ -495,7 +501,57 @@ class SyncOrchestrator:
                 bytes_hashed = COALESCE(?, bytes_hashed)
             WHERE id = ?
         """, (scanned, hashed, uploaded, deduplicated, errors, total_bytes, job_id))
+
+        # Update progress_percent based on current totals
+        await self.db.execute("""
+            UPDATE jobs SET progress_percent =
+                CASE
+                    WHEN files_scanned > 0 THEN
+                        (COALESCE(files_uploaded, 0) + COALESCE(files_deduplicated, 0) + COALESCE(files_errored, 0)) * 100.0 / files_scanned
+                    ELSE 0
+                END
+            WHERE id = ?
+        """, (job_id,))
         await self.db.commit()
+
+    async def _record_daily_stats(self, job_id: int):
+        """Record daily stats from completed job."""
+        today = datetime.now().strftime('%Y-%m-%d')
+
+        # Get job stats
+        async with self.db.execute("""
+            SELECT files_scanned, files_hashed, files_uploaded, files_errored, bytes_hashed
+            FROM jobs WHERE id = ?
+        """, (job_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return
+
+        scanned, hashed, uploaded, errored, bytes_hashed = row
+
+        # Calculate bytes uploaded from files updated in this job
+        async with self.db.execute("""
+            SELECT SUM(size) FROM files
+            WHERE status = 'uploaded'
+              AND DATE(uploaded_at) = ?
+        """, (today,)) as cursor:
+            result = await cursor.fetchone()
+            bytes_uploaded = result[0] or 0
+
+        # Upsert daily stats
+        await self.db.execute("""
+            INSERT INTO stats (date, files_scanned, files_hashed, files_uploaded, files_errored, bytes_read, bytes_uploaded)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date, host_id) DO UPDATE SET
+                files_scanned = stats.files_scanned + excluded.files_scanned,
+                files_hashed = stats.files_hashed + excluded.files_hashed,
+                files_uploaded = stats.files_uploaded + excluded.files_uploaded,
+                files_errored = stats.files_errored + excluded.files_errored,
+                bytes_read = stats.bytes_read + excluded.bytes_read,
+                bytes_uploaded = stats.bytes_uploaded + excluded.bytes_uploaded
+        """, (today, scanned or 0, hashed or 0, uploaded or 0, errored or 0, bytes_hashed or 0, bytes_uploaded))
+        await self.db.commit()
+        logger.info(f"Job {job_id}: Recorded daily stats for {today}")
 
 
 # Global orchestrator instance (set by app startup)

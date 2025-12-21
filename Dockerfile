@@ -37,6 +37,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Install runtime dependencies (sqlite3 for debugging)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy virtual environment from builder
 COPY --from=python-builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -51,6 +56,7 @@ RUN mkdir -p /config /data /photos && \
 # Copy application code
 COPY --chown=appuser:appuser src/ ./src/
 COPY --chown=appuser:appuser web/ ./web/
+COPY --chown=appuser:appuser check_progress.py ./
 
 # Copy frontend build output (Vite builds to /web/static relative to /frontend)
 COPY --from=frontend-builder --chown=appuser:appuser /web/static ./web/static/

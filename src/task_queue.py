@@ -4,7 +4,7 @@ Task Queue with Multi-Worker Support
 Handles batched processing with:
 - Work batches of ~1000 files for efficient parallel processing
 - Multiple concurrent workers that claim entire batches
-- Retry logic with exponential backoff
+- Retry logic with exponential backoff (via tenacity)
 - Circuit breaker pattern for API failures
 - Dead letter queue for permanent failures
 
@@ -16,16 +16,104 @@ Architecture:
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Callable, Optional
-import random
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 # Batch size for chunking files (100 for more granular progress updates)
 BATCH_SIZE = 100
+
+
+def get_retry_delay(retry_count: int, max_delay: float = 300.0, initial: float = 1.0) -> float:
+    """
+    Calculate retry delay using exponential backoff with jitter.
+
+    Based on tenacity's wait_exponential_jitter algorithm:
+    - Base delay doubles each retry: initial * 2^retry_count
+    - Adds random jitter in range [0, base_delay] to prevent thundering herd
+    - Caps at max_delay
+    """
+    # Exponential backoff: initial * 2^retry_count
+    exp_delay = initial * (2 ** retry_count)
+
+    # Add jitter: random value between 0 and exp_delay
+    jitter = random.uniform(0, exp_delay)
+
+    # Total delay with cap
+    return min(exp_delay + jitter, max_delay)
+
+
+class CircuitState(Enum):
+    CLOSED = "closed"    # Normal operation
+    OPEN = "open"        # Blocking requests
+    HALF_OPEN = "half_open"  # Testing if service recovered
+
+
+class CircuitBreaker:
+    """Simple async circuit breaker for API protection."""
+
+    def __init__(self, fail_max: int = 5, reset_timeout: float = 60.0, success_threshold: int = 2):
+        self.fail_max = fail_max
+        self.reset_timeout = reset_timeout
+        self.success_threshold = success_threshold
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time: Optional[datetime] = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def current_state(self) -> str:
+        return self.state.value
+
+    async def can_execute(self) -> bool:
+        async with self._lock:
+            if self.state == CircuitState.CLOSED:
+                return True
+
+            if self.state == CircuitState.OPEN:
+                if self.last_failure_time:
+                    elapsed = (datetime.now() - self.last_failure_time).total_seconds()
+                    if elapsed >= self.reset_timeout:
+                        self.state = CircuitState.HALF_OPEN
+                        logger.info("Circuit breaker: OPEN -> HALF_OPEN")
+                        return True
+                return False
+
+            return True  # HALF_OPEN allows test request
+
+    async def record_success(self):
+        async with self._lock:
+            if self.state == CircuitState.HALF_OPEN:
+                self.success_count += 1
+                if self.success_count >= self.success_threshold:
+                    self.state = CircuitState.CLOSED
+                    self.failure_count = 0
+                    self.success_count = 0
+                    logger.info("Circuit breaker: HALF_OPEN -> CLOSED (recovered)")
+            else:
+                self.failure_count = 0
+
+    async def record_failure(self):
+        async with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = datetime.now()
+
+            if self.state == CircuitState.HALF_OPEN:
+                self.state = CircuitState.OPEN
+                self.success_count = 0
+                logger.warning("Circuit breaker: HALF_OPEN -> OPEN (still failing)")
+            elif self.failure_count >= self.fail_max:
+                self.state = CircuitState.OPEN
+                logger.warning(f"Circuit breaker: CLOSED -> OPEN (after {self.failure_count} failures)")
+
+
+# Global circuit breaker instance
+circuit_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
 
 class TaskStatus(Enum):
@@ -86,96 +174,6 @@ class WorkBatch:
     tasks: list[Task] = field(default_factory=list)
 
 
-@dataclass
-class RetryConfig:
-    """Configuration for retry behavior"""
-    max_retries: int = 3
-    base_delay_seconds: float = 1.0
-    max_delay_seconds: float = 300.0  # 5 minutes max
-    exponential_base: float = 2.0
-    jitter: bool = True  # Add randomness to prevent thundering herd
-
-    def get_delay(self, retry_count: int) -> float:
-        """Calculate delay with exponential backoff + optional jitter"""
-        delay = min(
-            self.base_delay_seconds * (self.exponential_base ** retry_count),
-            self.max_delay_seconds
-        )
-        if self.jitter:
-            delay = delay * (0.5 + random.random())  # 50-150% of calculated delay
-        return delay
-
-
-@dataclass
-class CircuitBreakerConfig:
-    """Circuit breaker to prevent hammering failing APIs"""
-    failure_threshold: int = 5  # Failures before opening circuit
-    success_threshold: int = 2  # Successes to close circuit
-    timeout_seconds: float = 60.0  # How long to stay open
-
-
-class CircuitState(Enum):
-    CLOSED = "closed"  # Normal operation
-    OPEN = "open"      # Blocking requests
-    HALF_OPEN = "half_open"  # Testing if service recovered
-
-
-class CircuitBreaker:
-    """Prevents cascading failures by stopping requests to failing services"""
-
-    def __init__(self, config: CircuitBreakerConfig):
-        self.config = config
-        self.state = CircuitState.CLOSED
-        self.failure_count = 0
-        self.success_count = 0
-        self.last_failure_time: Optional[datetime] = None
-        self._lock = asyncio.Lock()
-
-    async def can_execute(self) -> bool:
-        async with self._lock:
-            if self.state == CircuitState.CLOSED:
-                return True
-
-            if self.state == CircuitState.OPEN:
-                # Check if timeout has passed
-                if self.last_failure_time:
-                    elapsed = (datetime.now() - self.last_failure_time).total_seconds()
-                    if elapsed >= self.config.timeout_seconds:
-                        self.state = CircuitState.HALF_OPEN
-                        logger.info("Circuit breaker entering HALF_OPEN state")
-                        return True
-                return False
-
-            # HALF_OPEN - allow request to test
-            return True
-
-    async def record_success(self):
-        async with self._lock:
-            if self.state == CircuitState.HALF_OPEN:
-                self.success_count += 1
-                if self.success_count >= self.config.success_threshold:
-                    self.state = CircuitState.CLOSED
-                    self.failure_count = 0
-                    self.success_count = 0
-                    logger.info("Circuit breaker CLOSED - service recovered")
-            else:
-                self.failure_count = 0
-
-    async def record_failure(self):
-        async with self._lock:
-            self.failure_count += 1
-            self.last_failure_time = datetime.now()
-
-            if self.state == CircuitState.HALF_OPEN:
-                # Failed during test - back to open
-                self.state = CircuitState.OPEN
-                self.success_count = 0
-                logger.warning("Circuit breaker OPEN - service still failing")
-            elif self.failure_count >= self.config.failure_threshold:
-                self.state = CircuitState.OPEN
-                logger.warning(f"Circuit breaker OPEN after {self.failure_count} failures")
-
-
 class TaskQueue:
     """
     SQLite-backed task queue with work batch support.
@@ -184,10 +182,8 @@ class TaskQueue:
     Workers claim entire batches and process all files within.
     """
 
-    def __init__(self, db, retry_config: Optional[RetryConfig] = None, batch_size: int = BATCH_SIZE):
+    def __init__(self, db, batch_size: int = BATCH_SIZE):
         self.db = db
-        self.retry_config = retry_config or RetryConfig()
-        self.circuit_breaker = CircuitBreaker(CircuitBreakerConfig())
         self.batch_size = batch_size
         self._shutdown = False
 
@@ -231,21 +227,27 @@ class TaskQueue:
         logger.info(f"Created {len(work_batch_ids)} work batches for job {job_id} ({task_type.value})")
         return work_batch_ids
 
-    async def claim_work_batch(self, worker_id: int, task_type: Optional[TaskType] = None) -> Optional[WorkBatch]:
+    async def claim_work_batch(self, worker_id: int, task_type: Optional[TaskType] = None, job_id: Optional[int] = None) -> Optional[WorkBatch]:
         """
         Atomically claim the next available work batch for processing.
         Returns the WorkBatch with all its tasks loaded.
+        If job_id is specified, only claims batches from that job.
         """
-        type_filter = f"AND batch_type = '{task_type.value}'" if task_type else ""
+        # Build query with parameterized filters
+        params = [BatchStatus.PENDING.value]
+        query = "SELECT id FROM work_batches WHERE status = ?"
+
+        if task_type:
+            query += " AND batch_type = ?"
+            params.append(task_type.value)
+        if job_id:
+            query += " AND job_id = ?"
+            params.append(job_id)
+
+        query += " ORDER BY id ASC LIMIT 1"
 
         # Find and claim a pending batch
-        async with self.db.execute(f"""
-            SELECT id FROM work_batches
-            WHERE status = ?
-            {type_filter}
-            ORDER BY id ASC
-            LIMIT 1
-        """, (BatchStatus.PENDING.value,)) as cursor:
+        async with self.db.execute(query, params) as cursor:
             row = await cursor.fetchone()
             if not row:
                 return None
@@ -262,7 +264,7 @@ class TaskQueue:
         # Check if we actually claimed it (another worker may have grabbed it first)
         if cursor.rowcount == 0:
             # Lost the race - try again with next available batch
-            return await self.claim_work_batch(worker_id, task_type)
+            return await self.claim_work_batch(worker_id, task_type, job_id)
 
         # Load full batch with tasks
         return await self._load_work_batch(batch_id)
@@ -306,14 +308,12 @@ class TaskQueue:
                 SET status = ?, completed_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             """, (TaskStatus.SUCCESS.value, task_id))
-            await self.circuit_breaker.record_success()
         else:
             await self._handle_task_failure(task_id, error)
-            await self.circuit_breaker.record_failure()
         await self.db.commit()
 
     async def _handle_task_failure(self, task_id: int, error: Optional[str]):
-        """Handle task failure with retry logic."""
+        """Handle task failure with retry logic using tenacity for delay calculation."""
         async with self.db.execute(
             "SELECT retry_count, max_retries FROM tasks WHERE id = ?",
             (task_id,)
@@ -324,7 +324,7 @@ class TaskQueue:
             retry_count, max_retries = row
 
         if retry_count < max_retries:
-            delay = self.retry_config.get_delay(retry_count)
+            delay = get_retry_delay(retry_count)
             next_retry = datetime.now() + timedelta(seconds=delay)
             await self.db.execute("""
                 UPDATE tasks
@@ -398,7 +398,7 @@ class TaskQueue:
             "completed_batches": 0,
             "failed_batches": 0,
             "by_type": {},
-            "circuit_breaker": self.circuit_breaker.state.value,
+            "circuit_breaker": circuit_breaker.current_state,
         }
 
         async with self.db.execute("""
@@ -497,12 +497,14 @@ class BatchWorker:
         handlers: dict[TaskType, Callable],
         worker_type: str = "upload",
         batch_handlers: dict[TaskType, Callable] = None,  # For batched processing
+        job_id: Optional[int] = None,  # Only process batches for this job
     ):
         self.worker_id = worker_id
         self.queue = queue
         self.handlers = handlers
         self.batch_handlers = batch_handlers or {}  # Handler(tasks: list[Task]) for batched ops
         self.worker_type = worker_type
+        self.job_id = job_id  # Filter to specific job
         self._running = False
         self._current_batch: Optional[WorkBatch] = None
 
@@ -533,13 +535,13 @@ class BatchWorker:
         import time
 
         # Check circuit breaker
-        if not await self.queue.circuit_breaker.can_execute():
+        if circuit_breaker.current_state == "open":
             logger.debug(f"BatchWorker {self.worker_id}: Circuit open, waiting...")
             await asyncio.sleep(5)
             return
 
-        # Claim a batch
-        batch = await self.queue.claim_work_batch(self.worker_id)
+        # Claim a batch (optionally filtered to specific job)
+        batch = await self.queue.claim_work_batch(self.worker_id, job_id=self.job_id)
         if not batch:
             await asyncio.sleep(0.5)  # No batches, wait
             return
@@ -641,18 +643,20 @@ class WorkerPool:
         self,
         queue: TaskQueue,
         handlers: dict[TaskType, Callable],
-        num_workers: int = 4
+        num_workers: int = 4,
+        job_id: Optional[int] = None,  # Only process batches for this job
     ):
         self.queue = queue
         self.handlers = handlers
         self.num_workers = num_workers
+        self.job_id = job_id
         self.workers: list[BatchWorker] = []
         self._tasks: list[asyncio.Task] = []
 
     async def start(self):
         """Start all workers."""
         for i in range(self.num_workers):
-            worker = BatchWorker(i, self.queue, self.handlers)
+            worker = BatchWorker(i, self.queue, self.handlers, job_id=self.job_id)
             self.workers.append(worker)
             task = asyncio.create_task(worker.start())
             self._tasks.append(task)

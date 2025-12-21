@@ -172,23 +172,69 @@ async def get_daily_stats(request: Request, days: int = 7):
 
 
 @router.get("/stats/chart")
-async def get_chart_data(request: Request):
-    """Get data for Chart.js visualization."""
+async def get_chart_data(request: Request, intervals: int = 20, minutes_per_interval: int = 5):
+    """Get activity for Chart.js visualization.
+
+    Returns upload, hash, and error counts for rolling time windows.
+    Default: 20 intervals of 5 minutes each = 100 minutes of history.
+    """
     db = request.app.state.db
 
-    async with db.execute("""
-        SELECT date, files_uploaded, files_hashed, files_errored, bytes_uploaded, bytes_read
-        FROM stats
-        WHERE date >= date('now', '-7 days')
-        ORDER BY date ASC
-    """) as cursor:
-        rows = [dict(row) async for row in cursor]
+    labels = []
+    uploaded = []
+    hashed = []
+    errors = []
+
+    for i in range(intervals - 1, -1, -1):
+        start_offset = i * minutes_per_interval
+        end_offset = (i + 1) * minutes_per_interval
+        start_param = f'-{end_offset} minutes'
+        end_param = f'-{start_offset} minutes'
+
+        # Uploads in this window
+        async with db.execute("""
+            SELECT COUNT(*) as count
+            FROM files
+            WHERE uploaded_at IS NOT NULL
+              AND uploaded_at >= datetime('now', ?)
+              AND uploaded_at < datetime('now', ?)
+        """, (start_param, end_param)) as cursor:
+            row = await cursor.fetchone()
+            uploaded.append(row['count'] if row else 0)
+
+        # Hashed files (created with sha256) in this window
+        async with db.execute("""
+            SELECT COUNT(*) as count
+            FROM files
+            WHERE sha256 IS NOT NULL
+              AND created_at >= datetime('now', ?)
+              AND created_at < datetime('now', ?)
+        """, (start_param, end_param)) as cursor:
+            row = await cursor.fetchone()
+            hashed.append(row['count'] if row else 0)
+
+        # Errors in this window
+        async with db.execute("""
+            SELECT COUNT(*) as count
+            FROM files
+            WHERE status = 'error'
+              AND updated_at >= datetime('now', ?)
+              AND updated_at < datetime('now', ?)
+        """, (start_param, end_param)) as cursor:
+            row = await cursor.fetchone()
+            errors.append(row['count'] if row else 0)
+
+        if start_offset == 0:
+            labels.append('now')
+        else:
+            labels.append(f'-{start_offset}m')
 
     return {
-        "labels": [row['date'] for row in rows],
-        "uploaded": [row['files_uploaded'] or 0 for row in rows],
-        "hashed": [row['files_hashed'] or 0 for row in rows],
-        "errors": [row['files_errored'] or 0 for row in rows],
+        "labels": labels,
+        "uploaded": uploaded,
+        "hashed": hashed,
+        "errors": errors,
+        "interval_minutes": minutes_per_interval,
     }
 
 
@@ -524,6 +570,15 @@ async def get_activity(request: Request, limit: int = 20):
     return rows
 
 
+# Application logs (from in-memory buffer)
+@router.get("/logs")
+async def get_logs(limit: int = 100, level: str = None):
+    """Get recent application logs from in-memory buffer."""
+    from src.log_buffer import get_log_buffer
+    buffer = get_log_buffer()
+    return buffer.get_logs(limit=limit, level=level)
+
+
 # Files endpoints
 @router.get("/files")
 async def list_files(
@@ -531,9 +586,11 @@ async def list_files(
     page: int = 1,
     limit: int = 50,
     search: str = "",
-    status: str = ""
+    status: str = "",
+    sort_by: str = "created_at",
+    sort_dir: str = "desc"
 ):
-    """List files with pagination, search, and status filter."""
+    """List files with pagination, search, status filter, and sorting."""
     db = request.app.state.db
     offset = (page - 1) * limit
 
@@ -552,6 +609,12 @@ async def list_files(
 
     where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
+    # Validate and sanitize sort parameters
+    valid_columns = {'relative_path', 'size', 'status', 'mtime', 'created_at', 'uploaded_at'}
+    if sort_by not in valid_columns:
+        sort_by = 'created_at'
+    sort_direction = 'ASC' if sort_dir.lower() == 'asc' else 'DESC'
+
     # Get files
     query = f"""
         SELECT id, source_name, relative_path, filename, local_path,
@@ -559,7 +622,7 @@ async def list_files(
                uploaded_at, created_at
         FROM files
         {where_sql}
-        ORDER BY created_at DESC
+        ORDER BY {sort_by} {sort_direction}
         LIMIT ? OFFSET ?
     """
     params.extend([limit, offset])
@@ -636,6 +699,146 @@ async def get_file_preview(request: Request, file_id: int):
     return FileResponse(file_path, media_type=media_type)
 
 
+# Error tracking endpoints
+@router.get("/errors")
+async def get_errors(
+    request: Request,
+    page: int = 1,
+    limit: int = 50,
+    error_type: str = ""  # "files", "tasks", "dead"
+):
+    """Get files and tasks with errors."""
+    db = request.app.state.db
+    offset = (page - 1) * limit
+
+    # Summary counts
+    async with db.execute("""
+        SELECT
+            (SELECT COUNT(*) FROM files WHERE status = 'error') as error_files,
+            (SELECT COUNT(*) FROM files WHERE error_message IS NOT NULL) as files_with_messages,
+            (SELECT COUNT(*) FROM tasks WHERE status = 'dead') as dead_tasks,
+            (SELECT COUNT(*) FROM tasks WHERE status = 'failed') as failed_tasks
+    """) as cursor:
+        summary = dict(await cursor.fetchone())
+
+    # Get error files
+    if error_type in ("", "files"):
+        async with db.execute("""
+            SELECT id, source_name, relative_path, filename, status,
+                   error_message, updated_at
+            FROM files
+            WHERE status = 'error' OR error_message IS NOT NULL
+            ORDER BY updated_at DESC
+            LIMIT ? OFFSET ?
+        """, (limit, offset)) as cursor:
+            error_files = [dict(row) async for row in cursor]
+    else:
+        error_files = []
+
+    # Get dead/failed tasks
+    if error_type in ("", "tasks", "dead"):
+        async with db.execute("""
+            SELECT t.id, t.task_type, t.status, t.error_message,
+                   t.retry_count, t.max_retries, t.completed_at,
+                   f.relative_path, f.filename
+            FROM tasks t
+            LEFT JOIN files f ON t.file_id = f.id
+            WHERE t.status IN ('dead', 'failed')
+            ORDER BY t.completed_at DESC
+            LIMIT ? OFFSET ?
+        """, (limit, offset)) as cursor:
+            error_tasks = [dict(row) async for row in cursor]
+    else:
+        error_tasks = []
+
+    # Get recent error messages grouped by type
+    async with db.execute("""
+        SELECT error_message, COUNT(*) as count
+        FROM files
+        WHERE error_message IS NOT NULL
+        GROUP BY error_message
+        ORDER BY count DESC
+        LIMIT 10
+    """) as cursor:
+        error_breakdown = [dict(row) async for row in cursor]
+
+    return {
+        "summary": summary,
+        "error_files": error_files,
+        "error_tasks": error_tasks,
+        "error_breakdown": error_breakdown,
+        "page": page,
+        "limit": limit
+    }
+
+
+@router.post("/errors/retry/{task_id}")
+async def retry_dead_task(request: Request, task_id: int):
+    """Reset a dead task to pending for retry."""
+    db = request.app.state.db
+
+    async with db.execute(
+        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    if not row:
+        raise HTTPException(404, "Task not found")
+
+    if row['status'] not in ('dead', 'failed'):
+        raise HTTPException(400, f"Task status is '{row['status']}', not dead/failed")
+
+    await db.execute("""
+        UPDATE tasks
+        SET status = 'pending',
+            error_message = NULL,
+            retry_count = 0,
+            next_retry_at = NULL
+        WHERE id = ?
+    """, (task_id,))
+    await db.commit()
+
+    return {"status": "reset", "task_id": task_id}
+
+
+@router.post("/errors/retry-all")
+async def retry_all_dead_tasks(request: Request):
+    """Reset all dead tasks to pending."""
+    db = request.app.state.db
+
+    async with db.execute("""
+        UPDATE tasks
+        SET status = 'pending',
+            error_message = NULL,
+            retry_count = 0,
+            next_retry_at = NULL
+        WHERE status = 'dead'
+    """) as cursor:
+        count = cursor.rowcount
+
+    await db.commit()
+
+    return {"status": "reset", "count": count}
+
+
+@router.delete("/errors/clear")
+async def clear_file_errors(request: Request):
+    """Clear error status from files (reset to pending)."""
+    db = request.app.state.db
+
+    async with db.execute("""
+        UPDATE files
+        SET status = 'pending',
+            error_message = NULL
+        WHERE status = 'error'
+    """) as cursor:
+        count = cursor.rowcount
+
+    await db.commit()
+
+    return {"status": "cleared", "count": count}
+
+
 # Database operations
 @router.get("/db/stats")
 async def get_db_stats(request: Request):
@@ -670,6 +873,130 @@ async def export_db(request: Request):
     """Export file list as CSV."""
     # TODO: Implement CSV export
     return {"status": "not_implemented"}
+
+
+@router.post("/stats/backfill")
+async def backfill_stats(request: Request):
+    """Backfill daily stats from files table timestamps.
+
+    Uses uploaded_at for upload stats and created_at for hash stats.
+    """
+    db = request.app.state.db
+
+    # Clear existing stats first to avoid duplicates
+    await db.execute("DELETE FROM stats")
+
+    # Backfill by combining upload and hash data per date
+    # Use a CTE to get all dates and aggregate data
+    await db.execute("""
+        INSERT INTO stats (date, files_uploaded, bytes_uploaded, files_hashed, bytes_read, files_errored)
+        SELECT
+            date,
+            SUM(files_uploaded) as files_uploaded,
+            SUM(bytes_uploaded) as bytes_uploaded,
+            SUM(files_hashed) as files_hashed,
+            SUM(bytes_read) as bytes_read,
+            SUM(files_errored) as files_errored
+        FROM (
+            -- Uploaded files by upload date
+            SELECT
+                DATE(uploaded_at) as date,
+                COUNT(*) as files_uploaded,
+                SUM(size) as bytes_uploaded,
+                0 as files_hashed,
+                0 as bytes_read,
+                0 as files_errored
+            FROM files
+            WHERE uploaded_at IS NOT NULL
+            GROUP BY DATE(uploaded_at)
+
+            UNION ALL
+
+            -- Hashed files by creation date
+            SELECT
+                DATE(created_at) as date,
+                0 as files_uploaded,
+                0 as bytes_uploaded,
+                COUNT(*) as files_hashed,
+                SUM(size) as bytes_read,
+                0 as files_errored
+            FROM files
+            WHERE sha256 IS NOT NULL
+            GROUP BY DATE(created_at)
+
+            UNION ALL
+
+            -- Error files by update date
+            SELECT
+                DATE(updated_at) as date,
+                0 as files_uploaded,
+                0 as bytes_uploaded,
+                0 as files_hashed,
+                0 as bytes_read,
+                COUNT(*) as files_errored
+            FROM files
+            WHERE status = 'error'
+            GROUP BY DATE(updated_at)
+        )
+        GROUP BY date
+    """)
+
+    await db.commit()
+
+    # Return the backfilled stats
+    async with db.execute("""
+        SELECT * FROM stats ORDER BY date DESC LIMIT 30
+    """) as cursor:
+        rows = [dict(row) async for row in cursor]
+
+    return {"status": "backfilled", "rows": len(rows), "stats": rows}
+
+
+@router.get("/uploads/recent")
+async def get_recent_uploads(request: Request, minutes: int = 5, limit: int = 20):
+    """Get recent uploads within a rolling time window.
+
+    Args:
+        minutes: Rolling window in minutes (default: 5)
+        limit: Max items to return (default: 20)
+    """
+    db = request.app.state.db
+
+    # Get recent uploads within rolling window
+    async with db.execute("""
+        SELECT
+            id, filename, relative_path, size, uploaded_at, media_id,
+            CAST((julianday('now') - julianday(uploaded_at)) * 24 * 60 AS INTEGER) as minutes_ago
+        FROM files
+        WHERE uploaded_at IS NOT NULL
+          AND uploaded_at >= datetime('now', ?)
+        ORDER BY uploaded_at DESC
+        LIMIT ?
+    """, (f'-{minutes} minutes', limit)) as cursor:
+        recent = []
+        async for row in cursor:
+            item = dict(row)
+            # Add preview URL for image link
+            item['preview_url'] = f"/api/files/{item['id']}/preview"
+            recent.append(item)
+
+    # Get aggregate for rolling window
+    async with db.execute("""
+        SELECT
+            COUNT(*) as count,
+            SUM(size) as total_bytes
+        FROM files
+        WHERE uploaded_at IS NOT NULL
+          AND uploaded_at >= datetime('now', ?)
+    """, (f'-{minutes} minutes',)) as cursor:
+        agg = dict(await cursor.fetchone())
+
+    return {
+        "window_minutes": minutes,
+        "count": agg['count'] or 0,
+        "total_bytes": agg['total_bytes'] or 0,
+        "uploads": recent
+    }
 
 
 @router.delete("/jobs/cleanup")

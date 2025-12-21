@@ -14,6 +14,10 @@
   let previewFile = null;
   let previewLoading = false;
 
+  // Sort state
+  let sortColumn = 'relative_path';
+  let sortDirection = 'asc';
+
   function formatBytes(bytes) {
     if (!bytes) return '0 B';
     const k = 1024;
@@ -30,7 +34,7 @@
 
   async function loadFiles() {
     try {
-      const data = await api.getFiles(page, 50, search, statusFilter);
+      const data = await api.getFiles(page, 50, search, statusFilter, sortColumn, sortDirection);
       files = data.files || data || [];
       total = data.total || files.length;
       hasMore = files.length === 50;
@@ -50,6 +54,22 @@
   function handleFilter() {
     page = 1;
     loadFiles();
+  }
+
+  function toggleSort(column) {
+    if (sortColumn === column) {
+      sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+    } else {
+      sortColumn = column;
+      sortDirection = 'asc';
+    }
+    page = 1;
+    loadFiles();
+  }
+
+  function getSortIcon(column) {
+    if (sortColumn !== column) return '';
+    return sortDirection === 'asc' ? ' ▲' : ' ▼';
   }
 
   function nextPage() {
@@ -80,9 +100,39 @@
     previewLoading = false;
   }
 
+  function getPreviewableFiles() {
+    const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif'];
+    const videoExts = ['mp4', 'mov', 'avi', 'mkv', '3gp'];
+    return files.filter(f => {
+      const ext = (f.extension || '').toLowerCase();
+      return imageExts.includes(ext) || videoExts.includes(ext);
+    });
+  }
+
+  function navigatePreview(direction) {
+    if (!previewFile) return;
+    const previewable = getPreviewableFiles();
+    const currentIndex = previewable.findIndex(f => f.id === previewFile.id);
+    if (currentIndex === -1) return;
+
+    const newIndex = currentIndex + direction;
+    if (newIndex >= 0 && newIndex < previewable.length) {
+      previewFile = previewable[newIndex];
+      previewLoading = true;
+    }
+  }
+
   function handleKeydown(e) {
-    if (e.key === 'Escape' && previewFile) {
-      closePreview();
+    if (previewFile) {
+      if (e.key === 'Escape') {
+        closePreview();
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        navigatePreview(-1);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        navigatePreview(1);
+      }
     }
   }
 
@@ -126,10 +176,18 @@
     <table class="w-full text-sm">
       <thead>
         <tr class="text-left text-gray-400 border-b border-gray-700 bg-gray-900">
-          <th class="px-4 py-3">Path</th>
-          <th class="px-4 py-3 text-right">Size</th>
-          <th class="px-4 py-3">Status</th>
-          <th class="px-4 py-3">Modified</th>
+          <th class="px-4 py-3 cursor-pointer hover:text-white select-none" on:click={() => toggleSort('relative_path')}>
+            Path{getSortIcon('relative_path')}
+          </th>
+          <th class="px-4 py-3 text-right cursor-pointer hover:text-white select-none" on:click={() => toggleSort('size')}>
+            Size{getSortIcon('size')}
+          </th>
+          <th class="px-4 py-3 cursor-pointer hover:text-white select-none" on:click={() => toggleSort('status')}>
+            Status{getSortIcon('status')}
+          </th>
+          <th class="px-4 py-3 cursor-pointer hover:text-white select-none" on:click={() => toggleSort('mtime')}>
+            Modified{getSortIcon('mtime')}
+          </th>
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-700">

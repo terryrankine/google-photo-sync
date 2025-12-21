@@ -18,6 +18,7 @@ import aiosqlite
 
 from .api import router as api_router
 from src.sync import SyncOrchestrator, set_orchestrator
+from src.log_buffer import get_log_buffer
 
 # Configure logging
 logging.basicConfig(
@@ -58,41 +59,49 @@ async def get_db():
 
 async def recover_interrupted_jobs(db: aiosqlite.Connection, orchestrator: SyncOrchestrator):
     """Reset orphaned work batches and auto-resume interrupted jobs."""
-    # Find jobs that were running when container stopped
+    # First, reset ALL orphaned running batches across ALL jobs
+    # This handles batches from old jobs that were never cleaned up
+    cursor = await db.execute("""
+        UPDATE work_batches
+        SET status = 'pending', worker_id = NULL, started_at = NULL
+        WHERE status = 'running'
+    """)
+    if cursor.rowcount > 0:
+        logger.info(f"Reset {cursor.rowcount} orphaned running batches to pending")
+
+    # Reset orphaned running tasks
+    cursor = await db.execute("""
+        UPDATE tasks
+        SET status = 'pending'
+        WHERE status = 'running'
+    """)
+    if cursor.rowcount > 0:
+        logger.info(f"Reset {cursor.rowcount} orphaned running tasks to pending")
+
+    await db.commit()
+
+    # Find the most recent running job
     async with db.execute("""
         SELECT id, current_phase, source_dirs
         FROM jobs WHERE status = 'running'
+        ORDER BY id DESC LIMIT 1
     """) as cursor:
-        interrupted_jobs = await cursor.fetchall()
+        most_recent = await cursor.fetchone()
 
-    if not interrupted_jobs:
+    if not most_recent:
         return
 
-    for job in interrupted_jobs:
-        job_id = job[0]
-        logger.info(f"Found interrupted job {job_id}")
+    job_id = most_recent[0]
+    logger.info(f"Found interrupted job {job_id}")
 
-        # Reset orphaned batches (worker claimed but died)
-        await db.execute("""
-            UPDATE work_batches
-            SET status = 'pending', worker_id = NULL, started_at = NULL
-            WHERE job_id = ? AND status = 'running'
-        """, (job_id,))
-
-        # Reset orphaned tasks within those batches
-        await db.execute("""
-            UPDATE tasks
-            SET status = 'pending'
-            WHERE work_batch_id IN (
-                SELECT id FROM work_batches WHERE job_id = ? AND status = 'pending'
-            ) AND status = 'running'
-        """, (job_id,))
-
-        await db.commit()
-        logger.info(f"Job {job_id}: Reset orphaned work batches to pending")
+    # Cancel any OTHER running jobs (shouldn't happen, but clean up)
+    await db.execute("""
+        UPDATE jobs SET status = 'cancelled'
+        WHERE status = 'running' AND id != ?
+    """, (job_id,))
+    await db.commit()
 
     # Auto-resume the most recent interrupted job
-    job_id = interrupted_jobs[0][0]
     logger.info(f"Auto-resuming job {job_id}")
     asyncio.create_task(orchestrator.resume_sync(job_id))
 
@@ -100,6 +109,10 @@ async def recover_interrupted_jobs(db: aiosqlite.Connection, orchestrator: SyncO
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
+    # Install log buffer handler to capture all logs
+    log_buffer = get_log_buffer()
+    log_buffer.install_handler()
+
     logger.info("Starting Google Photos Sync...")
 
     # Initialize database

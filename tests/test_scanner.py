@@ -56,12 +56,12 @@ class TestScanner:
         # First scan
         result1 = await scan_directory(sample_photos[0].parent)
 
-        # Simulate storing in DB with correct column names
+        # Simulate storing in DB with correct column names (including sha256 to mark as hashed)
         for f in result1.files:
             await test_db.execute(
-                """INSERT INTO files (source_name, relative_path, filename, local_path, extension, mtime, size, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                ("test", f.path.name, f.path.name, str(f.path), f.extension, f.mtime, f.size, "uploaded")
+                """INSERT INTO files (source_name, relative_path, filename, local_path, extension, mtime, size, status, sha256)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("test", f.path.name, f.path.name, str(f.path), f.extension, f.mtime, f.size, "uploaded", "fakehash123")
             )
         await test_db.commit()
 
@@ -80,13 +80,13 @@ class TestScanner:
         """Scanner should detect files that have been modified."""
         from src.scanner import scan_directory
 
-        # First scan and store with correct column names
+        # First scan and store with correct column names (including sha256 to mark as hashed)
         result1 = await scan_directory(sample_photos[0].parent)
         for f in result1.files:
             await test_db.execute(
-                """INSERT INTO files (source_name, relative_path, filename, local_path, extension, mtime, size, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                ("test", f.path.name, f.path.name, str(f.path), f.extension, f.mtime, f.size, "uploaded")
+                """INSERT INTO files (source_name, relative_path, filename, local_path, extension, mtime, size, status, sha256)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("test", f.path.name, f.path.name, str(f.path), f.extension, f.mtime, f.size, "uploaded", "fakehash123")
             )
         await test_db.commit()
 

@@ -18,7 +18,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import json
 
-from .task_queue import RetryableError, PermanentError
+from .task_queue import RetryableError, PermanentError, circuit_breaker
+
+
+class CircuitBreakerOpenError(Exception):
+    """Raised when circuit breaker is open and blocking requests."""
+    pass
+
+
 from .auth import TokenManager
 
 logger = logging.getLogger(__name__)
@@ -406,7 +413,8 @@ class UploadTokenBatcher:
     """
 
     BATCH_SIZE = 50
-    FLUSH_INTERVAL = 3.0  # Flush every 3 seconds to accumulate more tokens
+    FLUSH_INTERVAL = 5.0  # Max wait before flushing partial batch
+    MIN_BATCH_SIZE = 20   # Flush early if we hit this and waited 2+ seconds
 
     def __init__(self, uploader: 'GooglePhotosUploader', db, task_queue=None):
         self.uploader = uploader
@@ -417,6 +425,7 @@ class UploadTokenBatcher:
         self._batch_lock = asyncio.Lock()  # Ensures serial batchCreate
         self._running = False
         self._flush_task: Optional[asyncio.Task] = None
+        self._batch_start_time: Optional[float] = None  # Track when batch started accumulating
 
     async def start(self):
         """Start the periodic flush task."""
@@ -461,6 +470,10 @@ class UploadTokenBatcher:
         # Use synchronous append since we're not awaiting
         self._pending.append(pending)
 
+        # Track when batch started accumulating
+        if self._batch_start_time is None:
+            self._batch_start_time = asyncio.get_event_loop().time()
+
         # Flush immediately if batch is full
         if len(self._pending) >= self.BATCH_SIZE:
             asyncio.create_task(self._flush())
@@ -482,10 +495,27 @@ class UploadTokenBatcher:
         return await future
 
     async def _periodic_flush(self):
-        """Periodically flush partial batches."""
+        """Periodically flush partial batches with smart timing."""
         while self._running:
-            await asyncio.sleep(self.FLUSH_INTERVAL)
-            if self._pending:
+            await asyncio.sleep(1.0)  # Check every second
+
+            if not self._pending:
+                continue
+
+            now = asyncio.get_event_loop().time()
+            batch_age = now - (self._batch_start_time or now)
+
+            # Flush if:
+            # 1. Batch is full (50)
+            # 2. Max wait exceeded (5 sec)
+            # 3. Decent batch size (20+) and waited 2+ seconds
+            should_flush = (
+                len(self._pending) >= self.BATCH_SIZE or
+                batch_age >= self.FLUSH_INTERVAL or
+                (len(self._pending) >= self.MIN_BATCH_SIZE and batch_age >= 2.0)
+            )
+
+            if should_flush:
                 await self._flush()
 
     async def _flush(self):
@@ -495,6 +525,11 @@ class UploadTokenBatcher:
                 return
             batch = self._pending[:self.BATCH_SIZE]
             self._pending = self._pending[self.BATCH_SIZE:]
+            # Reset batch timer if queue is now empty
+            if not self._pending:
+                self._batch_start_time = None
+            else:
+                self._batch_start_time = asyncio.get_event_loop().time()
 
         if not batch:
             return
@@ -506,7 +541,19 @@ class UploadTokenBatcher:
             try:
                 await self.uploader._rate_limiter.acquire()
                 items = [(p.upload_token, p.filename) for p in batch]
-                results = await self.uploader._create_media_items_batch(items)
+                # Check circuit breaker before making API call
+                if not await circuit_breaker.can_execute():
+                    raise CircuitBreakerOpenError("Circuit breaker is open")
+
+                # Make the API call - circuit breaker tracks success/failure
+                try:
+                    results = await self.uploader._create_media_items_batch(items)
+                    # Record success for circuit breaker
+                    await circuit_breaker.record_success()
+                except Exception:
+                    # Record failure for circuit breaker
+                    await circuit_breaker.record_failure()
+                    raise
 
                 # Resolve futures and update DB
                 for pending, result in zip(batch, results):
@@ -536,6 +583,15 @@ class UploadTokenBatcher:
                 await self.db.commit()
                 logger.info(f"Batched {len(batch)} media items ({succeeded} succeeded, {failed} failed)")
 
+            except CircuitBreakerOpenError as e:
+                # Circuit is open - don't hammer the failing service
+                logger.warning(f"Circuit breaker open, skipping batch: {e}")
+                error = RetryableError("Circuit breaker open - service unavailable")
+                for pending in batch:
+                    if not pending.future.done():
+                        pending.future.set_exception(error)
+                    if self.task_queue:
+                        await self.task_queue.complete_task(pending.task_id, False, str(error))
             except Exception as e:
                 logger.error(f"Batch create failed: {e}")
                 for pending in batch:

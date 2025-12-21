@@ -281,10 +281,9 @@ class TestCircuitBreaker:
     @pytest.mark.asyncio
     async def test_circuit_opens_after_failures(self):
         """Circuit should open after threshold failures."""
-        from src.task_queue import CircuitBreaker, CircuitBreakerConfig, CircuitState
+        from src.task_queue import CircuitBreaker, CircuitState
 
-        config = CircuitBreakerConfig(failure_threshold=3)
-        breaker = CircuitBreaker(config)
+        breaker = CircuitBreaker(fail_max=3)
 
         assert breaker.state == CircuitState.CLOSED
 
@@ -296,10 +295,9 @@ class TestCircuitBreaker:
     @pytest.mark.asyncio
     async def test_circuit_blocks_when_open(self):
         """Circuit should block requests when open."""
-        from src.task_queue import CircuitBreaker, CircuitBreakerConfig, CircuitState
+        from src.task_queue import CircuitBreaker, CircuitState
 
-        config = CircuitBreakerConfig(failure_threshold=1, timeout_seconds=60)
-        breaker = CircuitBreaker(config)
+        breaker = CircuitBreaker(fail_max=1, reset_timeout=60)
 
         await breaker.record_failure()
         assert breaker.state == CircuitState.OPEN
@@ -310,13 +308,9 @@ class TestCircuitBreaker:
     @pytest.mark.asyncio
     async def test_circuit_recovers_after_timeout(self):
         """Circuit should allow test request after timeout."""
-        from src.task_queue import CircuitBreaker, CircuitBreakerConfig, CircuitState
+        from src.task_queue import CircuitBreaker, CircuitState
 
-        config = CircuitBreakerConfig(
-            failure_threshold=1,
-            timeout_seconds=0.1
-        )
-        breaker = CircuitBreaker(config)
+        breaker = CircuitBreaker(fail_max=1, reset_timeout=0.1)
 
         await breaker.record_failure()
         assert breaker.state == CircuitState.OPEN
@@ -330,14 +324,9 @@ class TestCircuitBreaker:
     @pytest.mark.asyncio
     async def test_circuit_closes_after_success(self):
         """Circuit should close after success in half-open state."""
-        from src.task_queue import CircuitBreaker, CircuitBreakerConfig, CircuitState
+        from src.task_queue import CircuitBreaker, CircuitState
 
-        config = CircuitBreakerConfig(
-            failure_threshold=1,
-            success_threshold=2,
-            timeout_seconds=0.1
-        )
-        breaker = CircuitBreaker(config)
+        breaker = CircuitBreaker(fail_max=1, success_threshold=2, reset_timeout=0.1)
 
         await breaker.record_failure()
         await asyncio.sleep(0.2)
@@ -464,48 +453,38 @@ class TestWorkerPoolUnit:
         assert status["active"] == 0
 
 
-class TestRetryConfig:
-    """Test retry configuration."""
+class TestRetryDelay:
+    """Test retry delay calculation with exponential backoff and jitter."""
 
     def test_exponential_backoff(self):
-        """Delay should increase exponentially."""
-        from src.task_queue import RetryConfig
+        """Delay should increase with retry count."""
+        from src.task_queue import get_retry_delay
 
-        config = RetryConfig(
-            base_delay_seconds=1.0,
-            exponential_base=2.0,
-            jitter=False
-        )
+        delay_0 = get_retry_delay(0)
+        delay_1 = get_retry_delay(1)
+        delay_2 = get_retry_delay(2)
+        delay_3 = get_retry_delay(3)
 
-        assert config.get_delay(0) == 1.0
-        assert config.get_delay(1) == 2.0
-        assert config.get_delay(2) == 4.0
-        assert config.get_delay(3) == 8.0
+        # Delays should increase (exponential backoff with jitter)
+        # Jitter adds randomness so we check rough ordering
+        assert delay_0 >= 0
+        assert delay_1 >= delay_0 * 0.5  # Allow for jitter variance
+        assert delay_2 >= delay_1 * 0.5
+        assert delay_3 >= delay_2 * 0.5
 
     def test_max_delay_cap(self):
         """Delay should be capped at max."""
-        from src.task_queue import RetryConfig
+        from src.task_queue import get_retry_delay
 
-        config = RetryConfig(
-            base_delay_seconds=1.0,
-            exponential_base=2.0,
-            max_delay_seconds=10.0,
-            jitter=False
-        )
-
-        # 2^10 = 1024, but should be capped at 10
-        assert config.get_delay(10) == 10.0
+        # With max_delay=10, even high retry counts should be capped
+        delay = get_retry_delay(20, max_delay=10.0)
+        assert delay <= 10.0
 
     def test_jitter_adds_randomness(self):
         """Jitter should add randomness to delays."""
-        from src.task_queue import RetryConfig
+        from src.task_queue import get_retry_delay
 
-        config = RetryConfig(
-            base_delay_seconds=1.0,
-            jitter=True
-        )
-
-        # With jitter, delays should vary (50-150% of base)
-        delays = [config.get_delay(0) for _ in range(10)]
-        # Not all delays should be identical
+        # get_retry_delay includes jitter for thundering herd prevention
+        delays = [get_retry_delay(2) for _ in range(10)]
+        # With jitter, delays should vary
         assert len(set(delays)) > 1

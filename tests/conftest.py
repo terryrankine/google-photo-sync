@@ -3,21 +3,26 @@ Pytest configuration and fixtures.
 """
 
 import pytest
+import pytest_asyncio
 import tempfile
 import shutil
 from pathlib import Path
 import aiosqlite
 
 
+# Configure pytest-asyncio
+pytest_plugins = ('pytest_asyncio',)
+
+
 @pytest.fixture
-async def temp_dir():
+def temp_dir():
     """Create a temporary directory for test files."""
     path = Path(tempfile.mkdtemp())
     yield path
     shutil.rmtree(path, ignore_errors=True)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_db(temp_dir):
     """Create a test database with schema."""
     db_path = temp_dir / "test.db"

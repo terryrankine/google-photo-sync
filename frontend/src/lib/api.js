@@ -70,12 +70,23 @@ export const api = {
   getChartData: () => fetchJSON('/api/stats/chart'),
   getDailyStats: () => fetchJSON('/api/stats/daily'),
   getActivity: () => fetchJSON('/api/activity'),
+  getRecentUploads: (minutes = 5, limit = 20) => fetchJSON(`/api/uploads/recent?minutes=${minutes}&limit=${limit}`),
+  backfillStats: () => postJSON('/api/stats/backfill'),
+
+  // Logs
+  getLogs: (limit = 100, level = undefined) => {
+    let url = `/api/logs?limit=${limit}`;
+    if (level) url += `&level=${encodeURIComponent(level)}`;
+    return fetchJSON(url);
+  },
 
   // Files
-  getFiles: (page = 1, limit = 50, search = '', status = '') => {
+  getFiles: (page = 1, limit = 50, search = '', status = '', sortBy = '', sortDir = '') => {
     let url = `/api/files?page=${page}&limit=${limit}`;
     if (search) url += `&search=${encodeURIComponent(search)}`;
     if (status) url += `&status=${encodeURIComponent(status)}`;
+    if (sortBy) url += `&sort_by=${encodeURIComponent(sortBy)}`;
+    if (sortDir) url += `&sort_dir=${encodeURIComponent(sortDir)}`;
     return fetchJSON(url);
   },
 
