@@ -1,68 +1,69 @@
 <script>
-  import { onMount } from 'svelte';
-  import { api } from '../api.js';
-  import { jobs as jobsStore, jobsLoaded, loadJobs as loadJobsStore } from '../stores/jobs.js';
+  import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
 
-  let deleting = {};
+  const queryClient = useQueryClient();
 
-  // Subscribe to store
-  $: jobs = $jobsStore;
+  // Jobs query
+  const jobsQuery = createQuery({
+    queryKey: ['jobs'],
+    queryFn: async () => {
+      const res = await fetch('/api/jobs?limit=50');
+      if (!res.ok) throw new Error('Failed to fetch jobs');
+      return res.json();
+    },
+  });
+
+  // Delete mutation
+  const deleteMutation = createMutation({
+    mutationFn: async (id) => {
+      const res = await fetch(`/api/jobs/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete job');
+      return res.json();
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['jobs'] }),
+  });
+
+  // Cleanup mutation
+  const cleanupMutation = createMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/jobs/cleanup?days=0&status=all', { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to cleanup jobs');
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      alert(`Deleted ${data.deleted} jobs`);
+    },
+  });
+
+  $: jobs = $jobsQuery.data || [];
 
   function formatDate(ts) {
     return new Date(ts).toLocaleString();
   }
 
-  async function refreshJobs() {
-    await loadJobsStore(50);
-  }
-
-  async function deleteJob(id) {
-    if (!confirm(`Delete job ${id}?`)) return;
-
-    deleting[id] = true;
-    try {
-      await api.deleteJob(id);
-      await refreshJobs();
-    } catch (e) {
-      console.error(e);
-      alert('Failed to delete job: ' + e.message);
+  function deleteJob(id) {
+    if (confirm(`Delete job ${id}?`)) {
+      $deleteMutation.mutate(id);
     }
-    deleting[id] = false;
   }
 
-  async function clearFinished() {
-    if (!confirm('Delete all completed and failed jobs?')) return;
-
-    try {
-      const result = await api.cleanupJobs(0, 'all');
-      await refreshJobs();
-      alert(`Deleted ${result.deleted} jobs`);
-    } catch (e) {
-      console.error(e);
-      alert('Failed to clear jobs: ' + e.message);
+  function clearFinished() {
+    if (confirm('Delete all completed and failed jobs?')) {
+      $cleanupMutation.mutate();
     }
   }
 
   function isActiveJob(status) {
     return ['running', 'scanning', 'hashing', 'uploading', 'paused'].includes(status);
   }
-
-  onMount(() => {
-    // Only fetch if not already loaded by App.svelte preload
-    if (!$jobsLoaded) {
-      refreshJobs();
-    }
-  });
 </script>
 
 <div class="space-y-6">
   <div class="flex justify-between items-center">
     <h1 class="text-3xl font-bold">Sync Jobs</h1>
-    <button
-      on:click={clearFinished}
-      class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
-    >
-      Clear Finished
+    <button on:click={clearFinished} disabled={$cleanupMutation.isPending} class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm disabled:opacity-50">
+      {$cleanupMutation.isPending ? 'Clearing...' : 'Clear Finished'}
     </button>
   </div>
 
@@ -107,12 +108,7 @@
             <td class="px-4 py-3 text-right text-red-400">{job.files_errored || 0}</td>
             <td class="px-4 py-3 text-center">
               {#if !isActiveJob(job.status)}
-                <button
-                  on:click|stopPropagation={() => deleteJob(job.id)}
-                  disabled={deleting[job.id]}
-                  class="p-1 text-gray-400 hover:text-red-400 disabled:opacity-50"
-                  title="Delete job"
-                >
+                <button on:click|stopPropagation={() => deleteJob(job.id)} disabled={$deleteMutation.isPending} class="p-1 text-gray-400 hover:text-red-400 disabled:opacity-50" title="Delete job">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                   </svg>
@@ -122,7 +118,9 @@
           </tr>
         {:else}
           <tr>
-            <td colspan="9" class="px-4 py-8 text-center text-gray-500">No jobs yet. Start a sync from the Dashboard.</td>
+            <td colspan="9" class="px-4 py-8 text-center text-gray-500">
+              {$jobsQuery.isLoading ? 'Loading...' : 'No jobs yet. Start a sync from the Dashboard.'}
+            </td>
           </tr>
         {/each}
       </tbody>

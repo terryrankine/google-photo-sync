@@ -1,6 +1,18 @@
 <script>
   import { link } from 'svelte-routing';
-  export let status = 'idle';
+  import { createQuery } from '@tanstack/svelte-query';
+
+  const statusQuery = createQuery({
+    queryKey: ['status'],
+    queryFn: async () => {
+      const res = await fetch('/api/status');
+      if (!res.ok) throw new Error('Failed to fetch status');
+      return res.json();
+    },
+    refetchInterval: 30000, // Poll every 30s
+  });
+
+  $: status = $statusQuery.data?.status || 'idle';
 </script>
 
 <nav class="bg-gray-900 border-b border-gray-800 sticky top-0 z-50">

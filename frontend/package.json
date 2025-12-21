@@ -28,6 +28,8 @@
     "vitest": "^1.6.0"
   },
   "dependencies": {
+    "@tanstack/svelte-query": "^5.90.2",
+    "@tanstack/svelte-table": "^8.21.3",
     "chart.js": "^4.5.1",
     "marked": "^17.0.1",
     "svelte-routing": "^2.13.0"

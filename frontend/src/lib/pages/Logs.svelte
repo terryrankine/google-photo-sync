@@ -1,19 +1,25 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
-  import { api } from '../api.js';
+  import { createQuery, useQueryClient } from '@tanstack/svelte-query';
 
-  let logs = [];
+  const queryClient = useQueryClient();
+
   let levelFilter = '';
   let autoRefresh = true;
-  let interval;
 
-  async function fetchLogs() {
-    try {
-      logs = await api.getLogs(200, levelFilter || undefined);
-    } catch (e) {
-      console.error('Failed to fetch logs:', e);
-    }
-  }
+  // Logs query with conditional auto-refresh
+  $: logsQuery = createQuery({
+    queryKey: ['logs', levelFilter],
+    queryFn: async () => {
+      let url = '/api/logs?limit=200';
+      if (levelFilter) url += `&level=${encodeURIComponent(levelFilter)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Failed to fetch logs');
+      return res.json();
+    },
+    refetchInterval: autoRefresh ? 2000 : false,
+  });
+
+  $: logs = $logsQuery.data || [];
 
   function getLevelClass(level) {
     switch (level) {
@@ -25,54 +31,26 @@
     }
   }
 
-  function handleFilterChange() {
-    fetchLogs();
+  function refresh() {
+    queryClient.invalidateQueries({ queryKey: ['logs'] });
   }
-
-  function toggleAutoRefresh() {
-    autoRefresh = !autoRefresh;
-    if (autoRefresh) {
-      interval = setInterval(fetchLogs, 2000);
-    } else {
-      clearInterval(interval);
-    }
-  }
-
-  onMount(() => {
-    fetchLogs();
-    interval = setInterval(fetchLogs, 2000);
-  });
-
-  onDestroy(() => {
-    if (interval) clearInterval(interval);
-  });
 </script>
 
 <div class="space-y-4">
   <div class="flex items-center justify-between">
     <h1 class="text-3xl font-bold">Logs</h1>
     <div class="flex gap-4 items-center">
-      <select
-        bind:value={levelFilter}
-        on:change={handleFilterChange}
-        class="px-3 py-1 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-blue-500"
-      >
+      <select bind:value={levelFilter} class="px-3 py-1 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-blue-500">
         <option value="">All Levels</option>
         <option value="ERROR">ERROR</option>
         <option value="WARNING">WARNING</option>
         <option value="INFO">INFO</option>
         <option value="DEBUG">DEBUG</option>
       </select>
-      <button
-        on:click={toggleAutoRefresh}
-        class="px-3 py-1 rounded text-sm {autoRefresh ? 'bg-green-600' : 'bg-gray-600'}"
-      >
+      <button on:click={() => autoRefresh = !autoRefresh} class="px-3 py-1 rounded text-sm {autoRefresh ? 'bg-green-600' : 'bg-gray-600'}">
         {autoRefresh ? 'Auto-refresh ON' : 'Auto-refresh OFF'}
       </button>
-      <button
-        on:click={fetchLogs}
-        class="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm"
-      >
+      <button on:click={refresh} class="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm">
         Refresh
       </button>
     </div>
@@ -88,7 +66,9 @@
           <span class="text-gray-200">{log.message}</span>
         </div>
       {:else}
-        <div class="px-4 py-8 text-center text-gray-500">No logs yet</div>
+        <div class="px-4 py-8 text-center text-gray-500">
+          {$logsQuery.isLoading ? 'Loading...' : 'No logs yet'}
+        </div>
       {/each}
     </div>
   </div>
