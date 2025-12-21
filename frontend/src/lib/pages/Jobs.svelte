@@ -1,20 +1,19 @@
 <script>
   import { onMount } from 'svelte';
   import { api } from '../api.js';
+  import { jobs as jobsStore, jobsLoaded, loadJobs as loadJobsStore } from '../stores/jobs.js';
 
-  let jobs = [];
   let deleting = {};
+
+  // Subscribe to store
+  $: jobs = $jobsStore;
 
   function formatDate(ts) {
     return new Date(ts).toLocaleString();
   }
 
-  async function loadJobs() {
-    try {
-      jobs = await api.getJobs(50);
-    } catch (e) {
-      console.error(e);
-    }
+  async function refreshJobs() {
+    await loadJobsStore(50);
   }
 
   async function deleteJob(id) {
@@ -23,7 +22,7 @@
     deleting[id] = true;
     try {
       await api.deleteJob(id);
-      await loadJobs();
+      await refreshJobs();
     } catch (e) {
       console.error(e);
       alert('Failed to delete job: ' + e.message);
@@ -36,7 +35,7 @@
 
     try {
       const result = await api.cleanupJobs(0, 'all');
-      await loadJobs();
+      await refreshJobs();
       alert(`Deleted ${result.deleted} jobs`);
     } catch (e) {
       console.error(e);
@@ -48,7 +47,12 @@
     return ['running', 'scanning', 'hashing', 'uploading', 'paused'].includes(status);
   }
 
-  onMount(loadJobs);
+  onMount(() => {
+    // Only fetch if not already loaded by App.svelte preload
+    if (!$jobsLoaded) {
+      refreshJobs();
+    }
+  });
 </script>
 
 <div class="space-y-6">

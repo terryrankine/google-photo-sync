@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { api } from '../api.js';
+  import { config as configStore, authStatus as authStatusStore, configLoaded, loadAllConfig, loadAuthStatus } from '../stores/config.js';
 
   let sourceDirs = '';
   let fileExtensions = '.jpg,.jpeg,.png,.heic,.mp4,.mov';
@@ -10,38 +11,38 @@
   let saving = false;
   let message = '';
 
-  // Auth state
-  let authStatus = null;
+  // Auth state (local UI state, not from store)
   let authUrl = '';
   let authCode = '';
   let authMessage = '';
   let authLoading = false;
 
-  onMount(async () => {
-    try {
-      const data = await api.getConfig();
-      // Parse source_dirs from JSON array to newline-separated string
-      if (data.source_dirs) {
-        try {
-          const dirs = JSON.parse(data.source_dirs);
-          sourceDirs = Array.isArray(dirs) ? dirs.join('\n') : data.source_dirs;
-        } catch {
-          sourceDirs = data.source_dirs;
-        }
-      }
-      fileExtensions = data.file_extensions || fileExtensions;
-      ignorePatterns = data.ignore_patterns || ignorePatterns;
-      parallelUploads = parseInt(data.parallel_uploads) || 4;
-      parallelHashers = parseInt(data.parallel_hashers) || 4;
-    } catch (e) {
-      console.error(e);
-    }
+  // Subscribe to auth status from store
+  $: authStatus = $authStatusStore;
 
-    // Load auth status
-    try {
-      authStatus = await api.getAuthStatus();
-    } catch (e) {
-      console.error('Failed to get auth status:', e);
+  function applyConfig(data) {
+    // Parse source_dirs from JSON array to newline-separated string
+    if (data.source_dirs) {
+      try {
+        const dirs = JSON.parse(data.source_dirs);
+        sourceDirs = Array.isArray(dirs) ? dirs.join('\n') : data.source_dirs;
+      } catch {
+        sourceDirs = data.source_dirs;
+      }
+    }
+    fileExtensions = data.file_extensions || fileExtensions;
+    ignorePatterns = data.ignore_patterns || ignorePatterns;
+    parallelUploads = parseInt(data.parallel_uploads) || 4;
+    parallelHashers = parseInt(data.parallel_hashers) || 4;
+  }
+
+  onMount(async () => {
+    // Use preloaded config from store if available
+    if ($configLoaded) {
+      applyConfig($configStore);
+    } else {
+      await loadAllConfig();
+      applyConfig($configStore);
     }
   });
 
@@ -66,7 +67,7 @@
       authMessage = 'Authentication successful!';
       authUrl = '';
       authCode = '';
-      authStatus = await api.getAuthStatus();
+      await loadAuthStatus();  // Update store
     } catch (e) {
       authMessage = e.message || 'Failed to authenticate';
     }
@@ -78,7 +79,7 @@
     authLoading = true;
     try {
       await api.revokeAuth();
-      authStatus = await api.getAuthStatus();
+      await loadAuthStatus();  // Update store
       authMessage = 'Token revoked. Click "Re-authenticate" to sign in again.';
     } catch (e) {
       authMessage = e.message || 'Failed to revoke';

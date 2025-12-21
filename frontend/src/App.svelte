@@ -2,6 +2,9 @@
   import { Router, Route } from 'svelte-routing';
   import { onMount, onDestroy } from 'svelte';
   import { api } from './lib/api.js';
+  import { loadAllStats, statsLoaded } from './lib/stores/stats.js';
+  import { loadJobs, jobsLoaded } from './lib/stores/jobs.js';
+  import { loadAllConfig, configLoaded } from './lib/stores/config.js';
   import Navbar from './lib/components/Navbar.svelte';
   import Dashboard from './lib/pages/Dashboard.svelte';
   import Jobs from './lib/pages/Jobs.svelte';
@@ -24,8 +27,21 @@
     }
   }
 
+  async function preloadData() {
+    // Preload all commonly needed data in parallel into stores
+    // Pages will read from stores if already loaded
+    const promises = [];
+
+    if (!$statsLoaded) promises.push(loadAllStats());
+    if (!$jobsLoaded) promises.push(loadJobs());
+    if (!$configLoaded) promises.push(loadAllConfig());
+
+    await Promise.all(promises);
+  }
+
   onMount(() => {
     fetchStatus();
+    preloadData();
     // Poll less frequently - dashboard page has its own polling
     interval = setInterval(fetchStatus, 30000);
   });
