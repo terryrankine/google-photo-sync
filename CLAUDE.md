@@ -9,6 +9,11 @@ Google Photos Sync Tool - A NAS-native application for syncing photos to Google 
 ## Development Commands
 
 ```bash
+# Setup Python virtual environment (first time)
+python3 -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# or: .venv\Scripts\activate  # Windows
+
 # Install dependencies
 pip install -r requirements.txt
 
@@ -57,8 +62,9 @@ docker-compose -f docker-compose.windows.yml up -d
 
 - `frontend/` - Svelte 4 + Vite + Tailwind CSS
 - Builds to `web/static/` served by FastAPI
-- Dashboard with Chart.js for metrics visualization (dual Y-axis for hashed vs uploaded)
-- Svelte stores in `frontend/src/lib/stores/` for persistent state between page navigations
+- Uses `@tanstack/svelte-query` for data fetching with caching
+- Uses `@tanstack/svelte-table` for server-side paginated tables
+- Chart.js for metrics visualization
 
 ### Upload Batching
 
@@ -122,6 +128,11 @@ Uses pytest with pytest-asyncio. Test fixtures in `tests/conftest.py` provide:
 - Host mapped: **18080** (access at http://localhost:18080)
 
 ## NAS Deployment
+
+```bash
+# Deploy to NAS (uses deploy.sh script)
+./deploy.sh
+```
 
 See `CLAUDE.local.md` for host-specific deployment info (not committed to git).
 
