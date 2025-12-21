@@ -27,6 +27,7 @@ describe('Navbar', () => {
       expect(screen.getByText('Files')).toBeInTheDocument();
       expect(screen.getByText('Logs')).toBeInTheDocument();
       expect(screen.getByText('Settings')).toBeInTheDocument();
+      expect(screen.getByText('Setup')).toBeInTheDocument();
     });
 
     it('has correct href for Dashboard link', () => {
@@ -69,6 +70,13 @@ describe('Navbar', () => {
 
       const settingsLink = screen.getByText('Settings').closest('a');
       expect(settingsLink).toHaveAttribute('href', '/config');
+    });
+
+    it('has correct href for Setup link', () => {
+      render(Navbar, { props: { status: 'idle' } });
+
+      const setupLink = screen.getByText('Setup').closest('a');
+      expect(setupLink).toHaveAttribute('href', '/setup');
     });
   });
 

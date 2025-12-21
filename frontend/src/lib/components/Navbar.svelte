@@ -15,6 +15,7 @@
           <a href="/files" use:link class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium">Files</a>
           <a href="/logs" use:link class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium">Logs</a>
           <a href="/config" use:link class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium">Settings</a>
+          <a href="/setup" use:link class="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium">Setup</a>
         </div>
       </div>
       <div class="flex items-center space-x-2">

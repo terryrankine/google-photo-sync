@@ -9,6 +9,7 @@
   import Files from './lib/pages/Files.svelte';
   import Logs from './lib/pages/Logs.svelte';
   import Config from './lib/pages/Config.svelte';
+  import Setup from './lib/pages/Setup.svelte';
 
   let status = 'idle';
   let interval;
@@ -44,6 +45,7 @@
       <Route path="/files" component={Files} />
       <Route path="/logs" component={Logs} />
       <Route path="/config" component={Config} />
+      <Route path="/setup" component={Setup} />
     </main>
     <footer class="border-t border-gray-800 mt-12">
       <div class="max-w-7xl mx-auto px-4 py-6 text-center text-gray-500 text-sm">

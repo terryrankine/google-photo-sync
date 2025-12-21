@@ -313,6 +313,13 @@ describe('api module', () => {
       });
     });
 
+    describe('documentation endpoints', () => {
+      it('getQuickstart calls correct endpoint', async () => {
+        await api.getQuickstart();
+        expect(global.fetch).toHaveBeenCalledWith('/api/quickstart');
+      });
+    });
+
     describe('live metrics', () => {
       it('getLiveMetrics calls correct endpoint', async () => {
         await api.getLiveMetrics();

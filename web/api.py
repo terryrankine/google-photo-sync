@@ -1091,3 +1091,21 @@ async def resume_batch_compat(request: Request, batch_id: int, background_tasks:
 async def cancel_batch_compat(request: Request, batch_id: int):
     """Alias for /jobs/{id}/cancel - backwards compatibility."""
     return await cancel_job(request, batch_id)
+
+
+# Documentation endpoint
+@router.get("/quickstart")
+async def get_quickstart():
+    """Serve quickstart.md content - single source of truth for setup docs."""
+    # Look for quickstart.md in app root (where the code lives)
+    possible_paths = [
+        Path(__file__).parent.parent / "quickstart.md",  # /app/quickstart.md in container
+        Path("/app/quickstart.md"),
+        Path("./quickstart.md"),
+    ]
+
+    for path in possible_paths:
+        if path.exists():
+            return {"content": path.read_text(), "path": str(path)}
+
+    return {"content": "# Quickstart Guide\n\nDocumentation not found.", "path": None}

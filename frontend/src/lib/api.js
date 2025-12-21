@@ -94,4 +94,7 @@ export const api = {
   getConfig: () => fetchJSON('/api/config'),
   updateConfig: (config) => putJSON('/api/config', config),
   updateSourceDirs: (dirs) => putJSON('/api/config/source-dirs', { dirs }),
+
+  // Documentation
+  getQuickstart: () => fetchJSON('/api/quickstart'),
 };
