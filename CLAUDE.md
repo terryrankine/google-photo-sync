@@ -127,10 +127,30 @@ Uses pytest with pytest-asyncio. Test fixtures in `tests/conftest.py` provide:
 - Container internal: 8080
 - Host mapped: **18080** (access at http://localhost:18080)
 
+## MANDATORY: Pre-Deploy Checklist
+
+**ALWAYS test before deploying. NEVER deploy untested code.**
+
+```bash
+# 1. Test Python imports compile
+python -c "from web.app import app; from web.api import router"
+
+# 2. Test frontend builds
+cd frontend && npm run build
+
+# 3. Run pytest (if dependencies installed)
+pytest
+
+# 4. Only then deploy
+./deploy.sh
+```
+
+The deploy.sh script includes these checks, but you should verify manually first.
+
 ## NAS Deployment
 
 ```bash
-# Deploy to NAS (uses deploy.sh script)
+# Deploy to NAS (uses deploy.sh script - includes pre-deploy tests)
 ./deploy.sh
 ```
 
