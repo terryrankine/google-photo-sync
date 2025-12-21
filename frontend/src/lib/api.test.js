@@ -320,6 +320,33 @@ describe('api module', () => {
       });
     });
 
+    describe('auth endpoints', () => {
+      it('getAuthStatus calls correct endpoint', async () => {
+        await api.getAuthStatus();
+        expect(global.fetch).toHaveBeenCalledWith('/api/auth/status');
+      });
+
+      it('getAuthUrl calls correct endpoint', async () => {
+        await api.getAuthUrl();
+        expect(global.fetch).toHaveBeenCalledWith('/api/auth/url');
+      });
+
+      it('submitAuthCode posts code to callback endpoint', async () => {
+        await api.submitAuthCode('abc123');
+        expect(global.fetch).toHaveBeenCalledWith('/api/auth/callback', expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ code: 'abc123' })
+        }));
+      });
+
+      it('revokeAuth posts to revoke endpoint', async () => {
+        await api.revokeAuth();
+        expect(global.fetch).toHaveBeenCalledWith('/api/auth/revoke', expect.objectContaining({
+          method: 'POST'
+        }));
+      });
+    });
+
     describe('live metrics', () => {
       it('getLiveMetrics calls correct endpoint', async () => {
         await api.getLiveMetrics();

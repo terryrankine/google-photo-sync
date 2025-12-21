@@ -95,6 +95,12 @@ export const api = {
   updateConfig: (config) => putJSON('/api/config', config),
   updateSourceDirs: (dirs) => putJSON('/api/config/source-dirs', { dirs }),
 
+  // Auth
+  getAuthStatus: () => fetchJSON('/api/auth/status'),
+  getAuthUrl: () => fetchJSON('/api/auth/url'),
+  submitAuthCode: (code) => postJSON('/api/auth/callback', { code }),
+  revokeAuth: () => postJSON('/api/auth/revoke'),
+
   // Documentation
   getQuickstart: () => fetchJSON('/api/quickstart'),
 };

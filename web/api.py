@@ -513,45 +513,138 @@ async def remove_source_dir(request: Request, path: str):
 
 
 # Auth endpoints
-@router.post("/auth/upload")
-async def upload_credentials(request: Request, credentials: UploadFile = File(...)):
-    """Upload Google API credentials file."""
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/photoslibrary.appendonly",
+    "https://www.googleapis.com/auth/photoslibrary.readonly",
+]
+
+@router.get("/auth/status")
+async def get_auth_status():
+    """Check current authentication status."""
     config_dir = Path(os.getenv('CONFIG_DIR', './config'))
-    creds_path = config_dir / "credentials.json"
+    token_path = config_dir / "token.json"
+    creds_path = config_dir / "client_id.json"
 
-    content = await credentials.read()
-    creds_path.write_bytes(content)
+    has_credentials = creds_path.exists()
+    has_token = token_path.exists()
 
-    return {"status": "uploaded", "path": str(creds_path)}
+    # Check if token is valid
+    token_valid = False
+    if has_token:
+        try:
+            token_data = json.loads(token_path.read_text())
+            # Check expiry if available
+            expires_at = token_data.get('expires_at')
+            if expires_at:
+                from datetime import datetime
+                token_valid = datetime.fromisoformat(expires_at) > datetime.now()
+            else:
+                token_valid = 'refresh_token' in token_data
+        except:
+            pass
+
+    return {
+        "has_credentials": has_credentials,
+        "has_token": has_token,
+        "token_valid": token_valid,
+        "status": "authenticated" if token_valid else ("needs_auth" if has_credentials else "needs_credentials")
+    }
 
 
-@router.post("/auth/refresh")
-async def refresh_auth(request: Request):
-    """Trigger OAuth re-authentication."""
-    # TODO: Implement actual OAuth flow
-    return {"status": "auth_required", "url": "/auth/google"}
+@router.get("/auth/url")
+async def get_auth_url():
+    """Generate OAuth authorization URL for re-authentication."""
+    config_dir = Path(os.getenv('CONFIG_DIR', './config'))
+    creds_path = config_dir / "client_id.json"
+
+    if not creds_path.exists():
+        raise HTTPException(400, "No client_id.json found in /config")
+
+    try:
+        creds = json.loads(creds_path.read_text())
+        client_creds = creds.get('installed', creds.get('web', {}))
+        client_id = client_creds.get('client_id')
+
+        if not client_id:
+            raise HTTPException(400, "Invalid client_id.json - missing client_id")
+
+        # Build OAuth URL
+        import urllib.parse
+        params = {
+            "client_id": client_id,
+            "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",  # Manual copy-paste flow
+            "response_type": "code",
+            "scope": " ".join(GOOGLE_SCOPES),
+            "access_type": "offline",
+            "prompt": "consent",  # Force consent to get refresh token
+        }
+        auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
+
+        return {"url": auth_url}
+
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Invalid client_id.json - not valid JSON")
+
+
+class AuthCodeRequest(BaseModel):
+    code: str
+
+
+@router.post("/auth/callback")
+async def exchange_auth_code(body: AuthCodeRequest):
+    """Exchange authorization code for tokens."""
+    config_dir = Path(os.getenv('CONFIG_DIR', './config'))
+    creds_path = config_dir / "client_id.json"
+    token_path = config_dir / "token.json"
+
+    if not creds_path.exists():
+        raise HTTPException(400, "No client_id.json found")
+
+    creds = json.loads(creds_path.read_text())
+    client_creds = creds.get('installed', creds.get('web', {}))
+    client_id = client_creds.get('client_id')
+    client_secret = client_creds.get('client_secret')
+
+    # Exchange code for tokens
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "code": body.code,
+                "grant_type": "authorization_code",
+                "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+            }
+        ) as response:
+            if response.status != 200:
+                error_body = await response.text()
+                raise HTTPException(400, f"Token exchange failed: {error_body[:200]}")
+
+            token_data = await response.json()
+
+    # Add expiry timestamp
+    from datetime import datetime, timedelta
+    expires_in = token_data.get('expires_in', 3600)
+    token_data['expires_at'] = (datetime.now() + timedelta(seconds=expires_in)).isoformat()
+
+    # Save token
+    token_path.write_text(json.dumps(token_data, indent=2))
+
+    return {"status": "authenticated", "message": "Token saved successfully"}
 
 
 @router.post("/auth/revoke")
 async def revoke_auth(request: Request):
-    """Revoke Google API access."""
-    db = request.app.state.db
-
-    await db.execute(
-        "UPDATE config SET value = 'not_configured' WHERE key = 'google_auth_status'"
-    )
-    await db.execute(
-        "UPDATE config SET value = '' WHERE key = 'google_account'"
-    )
-    await db.commit()
-
-    # Delete token file
+    """Revoke Google API access (delete token)."""
     config_dir = Path(os.getenv('CONFIG_DIR', './config'))
     token_path = config_dir / "token.json"
+
     if token_path.exists():
         token_path.unlink()
 
-    return {"status": "revoked"}
+    return {"status": "revoked", "message": "Token deleted. Re-authenticate to continue syncing."}
 
 
 # Activity log

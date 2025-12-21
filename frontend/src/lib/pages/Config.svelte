@@ -10,6 +10,13 @@
   let saving = false;
   let message = '';
 
+  // Auth state
+  let authStatus = null;
+  let authUrl = '';
+  let authCode = '';
+  let authMessage = '';
+  let authLoading = false;
+
   onMount(async () => {
     try {
       const data = await api.getConfig();
@@ -29,7 +36,55 @@
     } catch (e) {
       console.error(e);
     }
+
+    // Load auth status
+    try {
+      authStatus = await api.getAuthStatus();
+    } catch (e) {
+      console.error('Failed to get auth status:', e);
+    }
   });
+
+  async function startReauth() {
+    authLoading = true;
+    authMessage = '';
+    try {
+      const data = await api.getAuthUrl();
+      authUrl = data.url;
+    } catch (e) {
+      authMessage = e.message || 'Failed to get auth URL';
+    }
+    authLoading = false;
+  }
+
+  async function submitCode() {
+    if (!authCode.trim()) return;
+    authLoading = true;
+    authMessage = '';
+    try {
+      await api.submitAuthCode(authCode.trim());
+      authMessage = 'Authentication successful!';
+      authUrl = '';
+      authCode = '';
+      authStatus = await api.getAuthStatus();
+    } catch (e) {
+      authMessage = e.message || 'Failed to authenticate';
+    }
+    authLoading = false;
+  }
+
+  async function revokeAuth() {
+    if (!confirm('This will delete your authentication token. You will need to re-authenticate to sync.')) return;
+    authLoading = true;
+    try {
+      await api.revokeAuth();
+      authStatus = await api.getAuthStatus();
+      authMessage = 'Token revoked. Click "Re-authenticate" to sign in again.';
+    } catch (e) {
+      authMessage = e.message || 'Failed to revoke';
+    }
+    authLoading = false;
+  }
 
   async function save() {
     saving = true;
@@ -61,6 +116,73 @@
 <div class="space-y-6 max-w-2xl">
   <h1 class="text-3xl font-bold">Settings</h1>
 
+  <!-- Authentication Section -->
+  <div class="bg-gray-800 rounded-lg p-6 border border-gray-700 space-y-4">
+    <h2 class="text-xl font-semibold">Google Photos Authentication</h2>
+
+    {#if authStatus}
+      <div class="flex items-center space-x-3">
+        <span class="w-3 h-3 rounded-full" class:bg-green-500={authStatus.status === 'authenticated'} class:bg-yellow-500={authStatus.status === 'needs_auth'} class:bg-red-500={authStatus.status === 'needs_credentials'}></span>
+        <span class="text-gray-300">
+          {#if authStatus.status === 'authenticated'}
+            Authenticated
+          {:else if authStatus.status === 'needs_auth'}
+            Token expired or missing - re-authentication required
+          {:else}
+            No credentials found - add client_id.json to /config
+          {/if}
+        </span>
+      </div>
+    {/if}
+
+    {#if authUrl}
+      <div class="space-y-3 p-4 bg-gray-900 rounded-lg">
+        <p class="text-sm text-gray-400">1. Click the link below to authorize with Google:</p>
+        <a href={authUrl} target="_blank" class="text-blue-400 hover:text-blue-300 underline break-all text-sm">{authUrl.slice(0, 80)}...</a>
+        <p class="text-sm text-gray-400 mt-3">2. After authorizing, paste the code here:</p>
+        <div class="flex space-x-2">
+          <input
+            type="text"
+            bind:value={authCode}
+            placeholder="Paste authorization code"
+            class="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white text-sm"
+          />
+          <button
+            on:click={submitCode}
+            disabled={authLoading || !authCode.trim()}
+            class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-medium text-sm disabled:opacity-50"
+          >
+            Submit
+          </button>
+        </div>
+      </div>
+    {:else if authStatus?.has_credentials}
+      <div class="flex space-x-3">
+        <button
+          on:click={startReauth}
+          disabled={authLoading}
+          class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded font-medium text-sm disabled:opacity-50"
+        >
+          {authLoading ? 'Loading...' : 'Re-authenticate'}
+        </button>
+        {#if authStatus?.status === 'authenticated'}
+          <button
+            on:click={revokeAuth}
+            disabled={authLoading}
+            class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded font-medium text-sm disabled:opacity-50"
+          >
+            Revoke Token
+          </button>
+        {/if}
+      </div>
+    {/if}
+
+    {#if authMessage}
+      <p class:text-green-400={authMessage.includes('successful')} class:text-red-400={!authMessage.includes('successful')} class="text-sm">{authMessage}</p>
+    {/if}
+  </div>
+
+  <!-- Sync Settings -->
   <div class="bg-gray-800 rounded-lg p-6 border border-gray-700 space-y-6">
     <div>
       <label class="block text-sm font-medium text-gray-400 mb-2">Source Directories</label>
