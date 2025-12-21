@@ -157,8 +157,11 @@ async def get_stats_cards(request: Request):
 
 
 @router.get("/stats/daily")
-async def get_daily_stats(request: Request, days: int = 7):
+async def get_daily_stats(request: Request, response: Response, days: int = 7):
     """Get daily statistics for the last N days."""
+    # Cache for 60 seconds - daily stats don't change frequently
+    response.headers["Cache-Control"] = "public, max-age=60"
+
     db = request.app.state.db
 
     async with db.execute("""
@@ -172,12 +175,15 @@ async def get_daily_stats(request: Request, days: int = 7):
 
 
 @router.get("/stats/chart")
-async def get_chart_data(request: Request, intervals: int = 20, minutes_per_interval: int = 5):
+async def get_chart_data(request: Request, response: Response, intervals: int = 20, minutes_per_interval: int = 5):
     """Get activity for Chart.js visualization.
 
     Returns upload, hash, and error counts for rolling time windows.
     Default: 20 intervals of 5 minutes each = 100 minutes of history.
     """
+    # Cache for 30 seconds - chart refreshes frequently but not every request
+    response.headers["Cache-Control"] = "public, max-age=30"
+
     db = request.app.state.db
 
     labels = []
@@ -1188,8 +1194,11 @@ async def cancel_batch_compat(request: Request, batch_id: int):
 
 # Documentation endpoint
 @router.get("/quickstart")
-async def get_quickstart():
+async def get_quickstart(response: Response):
     """Serve quickstart.md content - single source of truth for setup docs."""
+    # Cache for 1 hour - content rarely changes
+    response.headers["Cache-Control"] = "public, max-age=3600"
+
     # Look for quickstart.md in app root (where the code lives)
     possible_paths = [
         Path(__file__).parent.parent / "quickstart.md",  # /app/quickstart.md in container
