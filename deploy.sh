@@ -8,6 +8,13 @@ set -e
 NAS_HOST="terry-linux@192.168.11.186"
 NAS_PATH="/volume1/docker/gphoto-sync"
 
+# Use Windows SSH if running in WSL (has the SSH keys)
+if [[ -f /mnt/c/Windows/System32/OpenSSH/ssh.exe ]]; then
+    SSH_CMD="/mnt/c/Windows/System32/OpenSSH/ssh.exe"
+else
+    SSH_CMD="ssh"
+fi
+
 echo "Deploying to NAS (excluding data/ and config/)..."
 
 tar --exclude='.git' \
@@ -15,6 +22,7 @@ tar --exclude='.git' \
     --exclude='__pycache__' \
     --exclude='.pytest_cache' \
     --exclude='frontend/node_modules' \
+    --exclude='.venv' \
     --exclude='*.pyc' \
     --exclude='data' \
     --exclude='config' \
@@ -23,9 +31,9 @@ tar --exclude='.git' \
     --exclude='*.db' \
     --exclude='*.db-wal' \
     --exclude='*.db-shm' \
-    -czf - . | ssh "$NAS_HOST" "cd $NAS_PATH && tar -xzf -"
+    -czf - . | $SSH_CMD "$NAS_HOST" "cd $NAS_PATH && tar -xzf -"
 
 echo "Rebuilding container..."
-ssh "$NAS_HOST" "cd $NAS_PATH && /usr/local/bin/docker-compose build --no-cache && /usr/local/bin/docker-compose up -d"
+$SSH_CMD "$NAS_HOST" "cd $NAS_PATH && /usr/local/bin/docker-compose build --no-cache && /usr/local/bin/docker-compose up -d"
 
 echo "Done."
