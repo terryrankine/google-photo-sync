@@ -45,10 +45,6 @@
 <div class="space-y-6">
   <h1 class="text-3xl font-bold">Statistics</h1>
 
-  {#if !$statsLoaded}
-    <div class="text-center py-8 text-gray-400">Loading...</div>
-  {/if}
-
   <!-- Overview -->
   <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
     <h2 class="text-xl font-semibold mb-4">Overview</h2>

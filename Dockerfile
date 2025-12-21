@@ -56,6 +56,7 @@ RUN mkdir -p /config /data /photos && \
 # Copy application code
 COPY --chown=appuser:appuser src/ ./src/
 COPY --chown=appuser:appuser web/ ./web/
+COPY --chown=appuser:appuser quickstart.md ./
 COPY --chown=appuser:appuser check_progress.py ./
 
 # Copy frontend build output (Vite builds to /web/static relative to /frontend)
