@@ -52,9 +52,10 @@ Open http://your-nas-ip:8080
 
 ### 5. Authenticate
 
-1. Go to Settings in the web UI
-2. Upload `credentials.json` if not already in `/config`
-3. Click "Authenticate" and follow the OAuth flow
+1. Check container logs: `docker-compose logs -f`
+2. Copy the Google auth URL from the logs
+3. Complete OAuth in your browser
+4. See [Setup guide](/setup) in the web UI for detailed instructions
 
 ## How It Works
 
@@ -161,7 +162,12 @@ Google Photos does **not** deduplicate videos. First run may create duplicates i
 
 ### "Token expired" error
 
-Re-authenticate via Settings page.
+Delete token and restart container to re-authenticate:
+```bash
+docker-compose exec gphoto-sync rm /config/token.json
+docker-compose restart gphoto-sync
+# Check logs for new auth URL
+```
 
 ### Slow first run
 
@@ -169,7 +175,10 @@ Expected. The tool must hash and upload your entire library once. Subsequent run
 
 ### Database growing large
 
-Run "Optimize Database" from Settings to vacuum SQLite.
+Vacuum the SQLite database:
+```bash
+docker-compose exec gphoto-sync sqlite3 /data/gphoto_sync.db "VACUUM"
+```
 
 ## Development
 
