@@ -15,6 +15,31 @@ else
     SSH_CMD="ssh"
 fi
 
+# PRE-DEPLOY TESTS - fail fast before wasting time
+echo "Running pre-deploy tests..."
+
+# Test Python imports
+if [[ -f .venv/bin/python ]]; then
+    PYTHON=".venv/bin/python"
+else
+    PYTHON="python3"
+fi
+
+echo "  Checking Python imports..."
+$PYTHON -c "from web.app import app; from web.api import router; print('    Python OK')" || {
+    echo "ERROR: Python import failed. Fix before deploying."
+    exit 1
+}
+
+# Test frontend build
+echo "  Building frontend..."
+(cd frontend && npm run build) || {
+    echo "ERROR: Frontend build failed. Fix before deploying."
+    exit 1
+}
+
+echo "Pre-deploy tests passed."
+echo ""
 echo "Deploying to NAS (excluding data/ and config/)..."
 
 tar --exclude='.git' \
