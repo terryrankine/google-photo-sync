@@ -18,7 +18,7 @@
     refetchInterval: 10000,
   });
 
-  // Live metrics - only fetch when job is active
+  // Live metrics - always poll, lightweight endpoint
   const liveQuery = createQuery({
     queryKey: ['live-metrics'],
     queryFn: async () => {
@@ -26,8 +26,7 @@
       if (!res.ok) throw new Error('Failed to fetch live metrics');
       return res.json();
     },
-    refetchInterval: () => $dashboardQuery.data?.active_job ? 1500 : false,
-    enabled: () => !!$dashboardQuery.data?.active_job,
+    refetchInterval: 2000,  // Poll every 2 seconds
   });
 
   // Start job mutation
