@@ -19,8 +19,8 @@
 
   async function fetchStatus() {
     try {
-      // Use dashboard endpoint for status (single call gets everything)
-      const data = await api.getDashboard();
+      // Only fetch status - Dashboard page handles full dashboard data
+      const data = await api.getStatus();
       status = data.status || 'idle';
     } catch (e) {
       console.error(e);

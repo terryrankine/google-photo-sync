@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from starlette.middleware.gzip import GZipMiddleware
 import aiosqlite
 
 from .api import router as api_router
@@ -143,6 +144,9 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# Add gzip compression for responses > 500 bytes
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 # Include API routes
 app.include_router(api_router, prefix="/api")
