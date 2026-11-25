@@ -10,4 +10,6 @@ RUN pip install --no-cache-dir -r gphoto/requirements.txt
 COPY gphoto ./gphoto
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ARG VERSION=unknown
+ENV GPHOTO_VERSION=${VERSION}
 USER 1000:1000

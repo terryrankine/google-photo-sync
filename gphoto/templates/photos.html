@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block refresh %}{% if not q and not stage and list.page == 1 %}<meta http-equiv="refresh" content="30">{% endif %}{% endblock %}
+{% block body %}
+  {% if todo %}
+  <h1>Set it up</h1>
+  <ol class="todo panel">
+    {% for t in todo %}
+    <li {% if t.done %}class="done"{% endif %}>{{ t.name }}{% if not t.done %}<small>{{ t.how }}</small>{% endif %}</li>
+    {% endfor %}
+  </ol>
+  {% elif s.ok %}
+  <h1 class="good">Photos are flowing</h1>
+  {% else %}
+  <h1 class="bad">{{ "Needs you" if s.problems|length == 1 else s.problems|length ~ " things need you" }}</h1>
+  {% endif %}
+  <p class="beat">NAS checked {{ ago(s.last_pass) }}. Google checked {{ ago(s.last_check) }}.
+    Last photo confirmed in Google {{ ago(s.last_arrival) }}.</p>
+
+  {% for p in s.problems %}
+  <div class="problem" role="alert"><b>{{ p.title }}</b><p>{{ p.fix }}
+    {% if chrome_url and "Chrome" in p.fix %}<a href="{{ chrome_url }}" rel="noreferrer">Open Chrome on the Docker host</a>{% endif %}</p></div>
+  {% endfor %}
+
+  <ol class="flow panel" aria-label="Where photos go">
+    {% for f in flow %}
+    <li {% if f.state == "bad" %}class="stuck"{% endif %}>
+      <b>{{ f.name }}</b><small>{{ f.what }}</small>
+      <span class="count">{{ f.count }}</span>
+      <span class="state {{ f.state }}">{{ "✕ Stuck here" if f.state == "bad" else "✓ Working" }}</span>
+    </li>
+    {% endfor %}
+  </ol>
+  <p class="beat">{{ s.counts["skipped"] }} skipped. Phone photos are skipped because the phone sends its own.</p>
+
+  <h2>Photos</h2>
+  <form class="find" method="get" action="/">
+    <input type="search" name="q" value="{{ q }}" placeholder="Name or folder" aria-label="Search by name or folder" maxlength="200">
+    <select name="stage" aria-label="Where it is">
+      <option value="">Everywhere</option>
+      {% for name in stages %}<option value="{{ name }}" {% if name == stage %}selected{% endif %}>{{ name|capitalize }} ({{ "{:,}".format(s.counts[name]) }})</option>{% endfor %}
+    </select>
+    <button>Search</button>
+    {% if q or stage %}<a href="/">Clear</a>{% endif %}
+  </form>
+  <div class="panel scroll">
+  {% if list.items %}
+  <table>
+    <thead><tr><th>Photo</th><th>Where it is</th><th class="wide">Taken</th><th class="wide">On the NAS</th><th></th></tr></thead>
+    <tbody>
+    {% for p in list.items %}
+    {% set path = (p.folder ~ "/" ~ p.name) if p.folder else p.name %}
+    <tr>
+      <td><a href="/history?path={{ path|urlencode }}">{{ p.name }}</a><small>{{ p.folder }}</small></td>
+      <td>
+        {% if p.stage == "waiting" %}<span class="stage waiting">Goes in {{ until(p.due) }}</span>{% if p.reason %}<small>{{ p.reason }}</small>{% endif %}
+        {% elif p.stage == "on the way" %}<span class="stage way">On the way</span>
+        {% elif p.stage == "in Google" %}<span class="stage in">In Google</span><small>seen {{ when(p.confirmed_at) }}</small>
+        {% elif p.stage == "needs a look" %}<span class="stage failed">Left out</span><small>{{ p.reason }}</small>
+        {% elif p.stage == "failed" %}<span class="stage failed">Failed</span><small>{{ p.reason }}</small>
+        {% else %}<span class="stage skipped">Skipped</span><small>{{ p.reason or "" }}</small>{% endif %}
+      </td>
+      <td class="wide">{{ taken(p.taken) }}</td>
+      <td class="wide">{{ when(p.landed) }}</td>
+      <td>{% if can_ask and p.stage in ("failed", "needs a look", "on the way") %}
+        <form method="post" action="/photo"><input type="hidden" name="path" value="{{ path }}"><button name="action" value="retry">Send again</button></form>
+        {% if p.stage != "on the way" %}<form method="post" action="/photo"><input type="hidden" name="path" value="{{ path }}"><button name="action" value="dismiss">Dismiss</button></form>{% endif %}
+      {% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">{% if q or stage %}No photos match.{% else %}No camera photos yet. Copy some to the NAS and they show up here within 5 minutes.{% endif %}</p>
+  {% endif %}
+  </div>
+  {% if list.pages > 1 %}
+  <p class="pager">
+    {% if list.page > 1 %}<a href="/?q={{ q|urlencode }}&amp;stage={{ stage|urlencode }}&amp;page={{ list.page - 1 }}">Newer</a>{% endif %}
+    <span>Page {{ list.page }} of {{ list.pages }}, {{ "{:,}".format(list.total) }} photos</span>
+    {% if list.page < list.pages %}<a href="/?q={{ q|urlencode }}&amp;stage={{ stage|urlencode }}&amp;page={{ list.page + 1 }}">Older</a>{% endif %}
+  </p>
+  {% endif %}
+{% endblock %}

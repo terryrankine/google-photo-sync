@@ -10,19 +10,21 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 from zoneinfo import ZoneInfo
 
 import anyio.to_thread
 import jwt
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from gphoto import status
+from gphoto import charts, events, metrics, ops, otel, status
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +33,8 @@ REQUIRED = ("CF_ACCESS_TEAM", "CF_ACCESS_AUD", "ALLOWED_EMAIL")
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
-        "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self';"
+        " frame-ancestors 'none'; base-uri 'none'"
     ),
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
@@ -95,8 +98,17 @@ def create_app(
     clock: Callable[[], float] = time.time,
     chrome_url: str = "",
     zone: str = "Australia/Perth",
+    requests: Path | None = None,
+    samples: ops.Samples | None = None,
+    on_stop: Callable[[], None] | None = None,
 ) -> FastAPI:
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        if on_stop:
+            await anyio.to_thread.run_sync(on_stop)
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     pages = Environment(
         loader=FileSystemLoader(Path(__file__).parent / "templates"),
         autoescape=select_autoescape(default=True, default_for_string=True),
@@ -118,22 +130,64 @@ def create_app(
     def current() -> status.Status:
         return status.read(state, now=clock(), wait_seconds=wait_seconds)
 
-    @app.get("/")
-    def page() -> HTMLResponse:
-        s = current()
+    def when(then: float | None) -> str:
+        return datetime.fromtimestamp(then, local).strftime("%d %b %H:%M") if then else ""
 
-        def when(then: float | None) -> str:
-            return datetime.fromtimestamp(then, local).strftime("%d %b %H:%M") if then else ""
+    def taken(value: str | None) -> str:
+        return datetime.fromisoformat(value).strftime("%d %b %Y %H:%M") if value else ""
 
-        def taken(value: str | None) -> str:
-            return datetime.fromisoformat(value).strftime("%d %b %Y %H:%M") if value else ""
-
+    def render(name: str, s: status.Status, **more: Any) -> HTMLResponse:
         return HTMLResponse(
-            pages.get_template("status.html").render(
+            pages.get_template(name).render(
                 s=s, chrome_url=chrome_url, when=when, taken=taken,
-                ago=lambda t: _ago(s.now, t), until=lambda t: _until(s.now, t),
+                ago=lambda t: _ago(s.now, t), until=lambda t: _until(s.now, t), **more,
             )
         )
+
+    @app.get("/")
+    def page(q: str = "", stage: str = "", page: int = 1) -> HTMLResponse:
+        s = current()
+        q, stage = q[:200], stage if stage in status.STAGES else ""
+        todo = ops.checklist(s) if s.last_arrival is None else []
+        return render(
+            "photos.html", s, here="photos", q=q, stage=stage, stages=status.STAGES,
+            list=status.photos(state, wait_seconds, page, q, stage), flow=ops.flow(s),
+            todo=todo, can_ask=requests is not None,
+        )
+
+    @app.get("/history")
+    def history(path: str = "", trouble: bool = False) -> HTMLResponse:
+        found = events.history(state, 300, path[:1000] or None, trouble)
+        return render("history.html", current(), here="history", events=found, path=path[:1000],
+                      trouble=trouble)
+
+    @app.get("/ops")
+    def operations() -> HTMLResponse:
+        s = current()
+        saved = {job: metrics.load(state, job) for job in ("incoming", "google")}
+        return render(
+            "ops.html", s, here="ops", tiles=charts.tiles(saved, samples),
+            days=charts.columns(status.per_day(state, s.now, local)),
+            facts=charts.facts(state, saved, s.now, wait_seconds), backup=ops.last_backup(state),
+        )
+
+    @app.post("/photo")
+    async def ask(request: Request) -> Any:
+        # Access cookies are sent by any page the browser visits, so only a form on this
+        # very site may ask for something.
+        if request.headers.get("origin") not in (
+            f"https://{request.headers.get('host')}",
+        ):
+            return PlainTextResponse("Not from this site", status_code=403)
+        form = parse_qs((await request.body())[:8192].decode("utf-8", "replace"))
+        action, path = form.get("action", [""])[0], form.get("path", [""])[0]
+        if requests is None or action not in ops.ACTIONS or not status.known(state, path):
+            return PlainTextResponse("Not understood", status_code=400)
+        requests.mkdir(exist_ok=True)
+        if ops.waiting_requests(requests) >= ops.REQUESTS_WAITING:
+            return PlainTextResponse("Too many requests are waiting", status_code=429)
+        ops.write_request(requests, action, path)
+        return RedirectResponse("/", status_code=303)
 
     @app.get("/api/status")
     def api() -> JSONResponse:
@@ -151,8 +205,12 @@ def from_env() -> FastAPI:
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s"
     )
+    state = Path(os.getenv("STATE_DIR", "/state"))
+    samples = ops.Samples(state)
+    samples.start()
+    exporter = otel.start(state)
     return create_app(
-        state=Path(os.getenv("STATE_DIR", "/state")),
+        state=state,
         access=Access(
             team=os.environ["CF_ACCESS_TEAM"].rstrip("/"),
             audience=os.environ["CF_ACCESS_AUD"],
@@ -161,4 +219,7 @@ def from_env() -> FastAPI:
         wait_seconds=float(os.getenv("WAIT_HOURS", "4")) * 3600,
         chrome_url=os.getenv("CHROME_URL", ""),
         zone=os.getenv("TZ", "Australia/Perth"),
+        requests=Path(os.environ["REQUESTS_DIR"]) if os.getenv("REQUESTS_DIR") else None,
+        samples=samples,
+        on_stop=exporter.stop if exporter else None,
     )

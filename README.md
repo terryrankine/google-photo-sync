@@ -16,7 +16,16 @@ Copy camera photos to the NAS. About 4 hours later they are in Google Photos, sh
 | `gphoto-incoming` | Finds photos, waits, strips a copy, puts it in `staging` | NAS read-only, no network |
 | `gphoto-chrome` | Google Photos, signed in, watching `staging` | Internet, LAN desktop on port 3941 |
 | `gphoto-google` | Checks Chrome, proves arrival, tidies `staging` | Chrome by a socket file, no network |
-| `gphoto-web` | Status page | State read-only |
+| `gphoto-web` | Status page, history, ops. The only one that can export telemetry | State read-only |
+
+```mermaid
+flowchart LR
+  NAS["NAS folder"] --> Wait["Wait 4 h"] --> Scrub["Scrub a copy"] --> Staging["staging"]
+  Staging --> Chrome["Chrome, Google Photos"] --> Google["Google Photos"]
+  Google -. "seen at its capture second" .-> Check["gphoto-google"]
+  Check --> Page["Status page"]
+  Page -. "send again, dismiss" .-> Wait
+```
 
 Each database has one writer: `incoming.db` and `google.db`, both in `state/`.
 
@@ -28,10 +37,40 @@ NFS does not report changes made by other machines, so it polls every 5 minutes.
 
 Google Photos showed a photo at that capture second. A phone photo in the same second can stand in for it. Staged copies are removed 30 days after that, and only while nothing is missing. NAS files are never changed.
 
+## Settings
+
+All in `.env`. Run `docker compose up -d` after a change.
+
+| Setting | What it does |
+|---|---|
+| `PHOTOS`, `SINCE`, `WAIT_HOURS` | Share to watch, first day, time to delete bad shots |
+| `CAMERAS` | Makes to send. Default `NIKON` |
+| `SCRUB` | What to take out of the sent copy. Default `mpf` |
+| `SITE_HOST`, `ALLOWED_EMAIL`, `CF_ACCESS_*` | The page, and the one person let in |
+| `LAN_ADDRESS`, `CHROME_*` | The Chrome desktop |
+
+`SCRUB` groups: `mpf` (the preview that stops Google shrinking), `serial` (serial numbers and shutter count, which takes all maker notes with it), `gps`, `previews`, `names` (artist, copyright, owner, comments), `maker`. Capture time, time zone, rotation, colour, make and model can never be removed. If anything outside the listed groups would change, the photo is not sent and is shown as failed. Changing `SCRUB` changes the bytes, so a photo sent again after a change appears twice in Google.
+
+One install is for one person.
+
+## Telemetry
+
+Numbers are kept in memory and shown on the Ops page. To export, copy `.env.otel.example` to `.env.otel`. Only the standard `OTEL_` variables are used, over OTLP http/protobuf. Each photo is one trace. Photo paths are left out unless `OTEL_GPHOTO_PATHS=true`. If the collector is down, photos are not affected, and what happened meanwhile may not be exported.
+
+## What is kept
+
+| What | How long |
+|---|---|
+| Container logs | 3 files of 10 MB each |
+| History | 90 days |
+| Database backups in `state/backup` | 7 days |
+| Staged copies | 30 days after they are seen in Google |
+| Charts on the Ops page | A day, in memory |
+
 ## Set up
 
 1. Copy `deploy/` to the Docker host. Copy `.env.example` to `.env` and fill it in. Set `SOURCE` to this repo.
-2. `mkdir -p config staging state control && docker compose up -d --build`
+2. `mkdir -p config staging state control requests && docker compose up -d --build`
 3. Open `https://LAN_ADDRESS:3941`. Sign in to Google Photos. Choose Storage saver in Settings.
 4. Click **+**, **Back up folders**, and pick `/staging`.
 5. Restart `gphoto-chrome`. Click **+**, **Folder backup**, **Update permissions**, **Allow on every visit**.
@@ -45,9 +84,9 @@ The status page needs Traefik and a Cloudflare Access application. The app check
 | Anything odd, or after a host reboot | `docker compose up -d` |
 | Signed out, or folder permission lost | Open Chrome on port 3941 and follow the status page |
 | NAS check has not run | Check the NAS. A hard NFS mount waits for it, then carries on |
-| Send one photo again | `docker compose run --rm gphoto-incoming python -m gphoto.incoming --root /photos --staging /staging --db /state/incoming.db --since 2000-01-01 --retry "2026/folder/DSC_1.JPG"` |
-| Stop flagging a photo | The same with `--dismiss` |
-| Back up | Stop all four. Copy `state/` and `config/gprofile/`. Restore them as a pair |
+| Send one photo again, or stop flagging it | The buttons beside it on the page |
+| Back up | The databases are copied daily. For the Google sign-in, stop all four and copy `config/gprofile/` |
+| Restore a database | Stop all four, then copy `state/backup/state-*.db` over `state/incoming.db`, and `google-*.db` of the same day over `google.db` |
 | `incoming.db` lost | Everything since `SINCE` is staged again with the same bytes. Google should match them, not tested |
 | Update Chrome | Back up first. Chrome profiles do not go back a version. Change `CHROME_IMAGE`, then `docker compose up -d` |
 

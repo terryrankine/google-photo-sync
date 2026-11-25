@@ -93,16 +93,16 @@ def test_heartbeat_moves_during_a_long_pass(box, monkeypatch):
     make_jpeg(box.folder / "DSC_2.JPG", seed=2)
     box.landed_long_ago("DSC_1.JPG", "DSC_2.JPG")
     beats = []
-    real = incoming.strip_to
+    real = incoming.scrub_to
 
-    def slow(path, target):
+    def slow(path, target, rules):
         db = sqlite3.connect(box.db)
         beats.append(db.execute("SELECT at FROM heartbeat").fetchone())
         db.close()
         box.clock.now += 20 * MIN
-        real(path, target)
+        return real(path, target, rules)
 
-    monkeypatch.setattr(incoming, "strip_to", slow)
+    monkeypatch.setattr(incoming, "scrub_to", slow)
     box.runner().tick()
     assert beats == [(NOW,), (NOW + 20 * MIN,)]
 
@@ -359,6 +359,12 @@ class State:
         if confirmed:
             self._do("google.db", "INSERT INTO confirmed VALUES (?, ?)", path, confirmed)
 
+    def event(self, db, at, kind, path=None, detail=None):
+        self._do(
+            db, "INSERT INTO events (at, kind, path, detail) VALUES (?, ?, ?, ?)",
+            at, kind, path, detail,
+        )
+
     def read(self):
         return status.read(self.dir, now=NOW, wait_seconds=4 * HOUR)
 
@@ -459,7 +465,8 @@ def token(key=KEY, **over):
 def client(state):
     access = web.Access(team=TEAM, audience=AUD, email=ME, key_for=lambda t: KEY.public_key())
     app = web.create_app(
-        state.dir, access, clock=lambda: NOW, wait_seconds=4 * HOUR, chrome_url="https://lan"
+        state.dir, access, clock=lambda: NOW, wait_seconds=4 * HOUR, chrome_url="https://lan",
+        requests=state.dir / "requests",
     )
     return TestClient(app)
 

@@ -5,7 +5,9 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 PASS_STALE = 15 * 60
 CHECK_STALE = 10 * 60
@@ -30,6 +32,7 @@ STAGE_OF = {"waiting": "waiting", "failed": "failed", "look": "needs a look"}
 class Problem:
     title: str
     fix: str
+    area: str  # the step of the flow it belongs to
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,9 @@ class Status:
     last_pass: float | None = None
     last_check: float | None = None
     last_arrival: float | None = None
+    chrome_lost: bool = False
+    signed_in: bool = False
+    folder: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -70,6 +76,7 @@ def _tool_problems(beat: sqlite3.Row | None, now: float) -> list[Problem]:
             Problem(
                 "The NAS check has not run",
                 f"Check the NAS is up, because a stalled NAS stops the check. Then: {RESTART}",
+                "nas",
             )
         ]
     if beat["error"]:
@@ -77,6 +84,7 @@ def _tool_problems(beat: sqlite3.Row | None, now: float) -> list[Problem]:
             Problem(
                 f"Some NAS photos cannot be read: {beat['error']}",
                 "Check the NAS is up, and that the share is mounted and readable.",
+                "nas",
             )
         ]
     return []
@@ -84,15 +92,16 @@ def _tool_problems(beat: sqlite3.Row | None, now: float) -> list[Problem]:
 
 def _google_problems(health: sqlite3.Row | None, now: float) -> list[Problem]:
     if health is None or _stale(now, health["checked_at"], CHECK_STALE):
-        return [Problem("Google has not been checked", RESTART)]
+        return [Problem("Google has not been checked", RESTART, "chrome")]
     if health["error"]:
-        return [Problem(f"Chrome cannot be reached: {health['error']}", RESTART)]
+        return [Problem(f"Chrome cannot be reached: {health['error']}", RESTART, "chrome")]
     problems = []
     if not health["signed_in"]:
         problems.append(
             Problem(
                 "Google Photos is signed out",
                 "Open Chrome on the Docker host and sign in to Google.",
+                "chrome",
             )
         )
     elif health["folder"] != "granted":
@@ -101,6 +110,7 @@ def _google_problems(health: sqlite3.Row | None, now: float) -> list[Problem]:
                 "Google Photos has lost permission to the folder",
                 "Open Chrome on the Docker host. Click +, Folder backup, Update permissions,"
                 " Allow on every visit.",
+                "staging",
             )
         )
     if health["search_error"]:
@@ -108,6 +118,7 @@ def _google_problems(health: sqlite3.Row | None, now: float) -> list[Problem]:
             Problem(
                 f"Arrival cannot be checked: {health['search_error']}",
                 "Photos may still be going. Google may have changed its page or its language.",
+                "search",
             )
         )
     return problems
@@ -126,6 +137,7 @@ def _photo_problems(
             Problem(
                 _some(counts["failed"], "failed", "failed"),
                 "The reason is beside each one. Fix or delete the file, or dismiss it.",
+                "scrub",
             )
         )
     if counts["needs a look"]:
@@ -134,6 +146,7 @@ def _photo_problems(
                 _some(counts["needs a look"], "needs a look", "need a look"),
                 "A camera photo was left out, often because the camera clock is wrong."
                 " The reason is beside it. Fix the date, or dismiss it.",
+                "scrub",
             )
         )
     overdue = db.execute(
@@ -145,6 +158,7 @@ def _photo_problems(
             Problem(
                 _some(overdue, "is overdue", "are overdue"),
                 "The reason is beside each one. A full disk or a slow NAS is retried by itself.",
+                "wait",
             )
         )
     late = db.execute(
@@ -155,6 +169,7 @@ def _photo_problems(
             Problem(
                 _some(late, "has not arrived in Google", "have not arrived in Google"),
                 "Open Chrome on the Docker host and check Folder backup for an error.",
+                "google",
             )
         )
     return problems
@@ -239,4 +254,107 @@ def read(state: Path, now: float, wait_seconds: float) -> Status:
         last_pass=beat["at"] if beat else None,
         last_check=health["checked_at"] if health else None,
         last_arrival=last_arrival,
+        chrome_lost=health is None or bool(health["error"]),
+        signed_in=bool(health and health["signed_in"]),
+        folder=health["folder"] if health else None,
     )
+
+
+@dataclass(frozen=True)
+class Page:
+    items: list[Photo]
+    total: int
+    page: int
+    pages: int
+
+
+_PROOF = "goo.confirmed c ON c.path = i.path AND c.at >= i.sent_at"
+_NOT_SEEN = "i.sent_at >= (SELECT settled FROM goo.done) AND c.path IS NULL"
+# In the order they are shown: what needs attention first.
+_GROUPS = (
+    ("failed", "i.status = 'failed'"),
+    ("needs a look", "i.status = 'look'"),
+    ("waiting", "i.status = 'waiting'"),
+    ("on the way", f"i.status = 'sent' AND {_NOT_SEEN}"),
+    ("in Google", f"i.status = 'sent' AND NOT ({_NOT_SEEN})"),
+    ("skipped", "i.status IN ('skipped', 'duplicate', 'dismissed')"),
+)
+
+
+def photos(
+    state: Path, wait_seconds: float, page: int = 1, search: str = "", stage: str = "",
+    size: int = 50,
+) -> Page:
+    """One page of photos. Each group is counted and read on its own, so a page deep in
+    a long list does not sort everything."""
+    groups = [g for g in _GROUPS if not stage or g[0] == stage]
+    extra, values = "", []
+    if search:
+        literal = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        extra, values = " AND i.path LIKE ? ESCAPE '\\'", [f"%{literal}%"]
+    found: list[Photo] = []
+    try:
+        db = sqlite3.connect(f"{(state / 'incoming.db').absolute().as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return Page([], 0, 1, 1)
+    db.row_factory = sqlite3.Row
+    try:
+        db.execute("ATTACH ? AS goo", (f"{(state / 'google.db').absolute().as_uri()}?mode=ro",))
+        base = f"FROM incoming i LEFT JOIN {_PROOF} WHERE "
+        counts = [
+            db.execute(f"SELECT COUNT(*) {base}{where}{extra}", values).fetchone()[0]
+            for _, where in groups
+        ]
+        total = sum(counts)
+        pages = max(1, -(-total // size))
+        page = min(max(1, page), pages)
+        skip = (page - 1) * size
+        for (name, where), count in zip(groups, counts, strict=True):
+            if skip >= count:
+                skip -= count
+                continue
+            rows = db.execute(
+                f"SELECT i.*, c.at AS seen {base}{where}{extra}"
+                " ORDER BY i.landed DESC, i.path LIMIT ? OFFSET ?",
+                (*values, size - len(found), skip),
+            ).fetchall()
+            found += [_photo(r, name, r["seen"], wait_seconds) for r in rows]
+            skip = 0
+            if len(found) >= size:
+                break
+        return Page(found, total, page, pages)
+    except (sqlite3.Error, IndexError):
+        return Page([], 0, 1, 1)
+    finally:
+        db.close()
+
+
+def known(state: Path, path: str) -> bool:
+    try:
+        db = sqlite3.connect(f"{(state / 'incoming.db').absolute().as_uri()}?mode=ro", uri=True)
+        try:
+            return bool(db.execute("SELECT 1 FROM incoming WHERE path = ?", (path,)).fetchone())
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return False
+
+
+def per_day(state: Path, now: float, zone: ZoneInfo, days: int = 30) -> list[tuple[str, int]]:
+    """Photos seen in Google on each of the last days, oldest first."""
+    today = datetime.fromtimestamp(now, zone).date()
+    counts = {(today - timedelta(days=n)).isoformat(): 0 for n in range(days - 1, -1, -1)}
+    try:
+        db = sqlite3.connect(f"{(state / 'google.db').absolute().as_uri()}?mode=ro", uri=True)
+        try:
+            for (at,) in db.execute(
+                "SELECT at FROM confirmed WHERE at >= ?", (now - (days + 1) * 86400,)
+            ):
+                day = datetime.fromtimestamp(at, zone).date().isoformat()
+                if day in counts:
+                    counts[day] += 1
+        finally:
+            db.close()
+    except sqlite3.Error:
+        pass
+    return list(counts.items())

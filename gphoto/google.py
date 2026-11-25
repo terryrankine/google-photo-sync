@@ -26,6 +26,9 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
 
+from gphoto import events, ops
+from gphoto.metrics import MINUTES, Metrics
+
 logger = logging.getLogger(__name__)
 
 PHOTOS_URL = "https://photos.google.com/"
@@ -51,6 +54,7 @@ class ChromeState:
     tab: bool
     signed_in: bool
     folder: str | None  # 'granted', 'prompt', 'denied', or None when no folder is set up
+    version: str = ""
 
 
 class Chrome(Protocol):
@@ -120,6 +124,8 @@ class Checker:
         self._searches: dict[date, _Search] = {}
         self._reload_delay = RELOAD_EVERY
         self._reloaded = clock()
+        self._state = db_path.parent
+        self.metrics = Metrics("google", self._state, clock)
         self._db = sqlite3.connect(f"{db_path.absolute().as_uri()}", uri=True, timeout=30)
         self._db.row_factory = sqlite3.Row
         self._db.execute(
@@ -142,15 +148,72 @@ class Checker:
             " settled REAL NOT NULL, tidied REAL NOT NULL)"
         )
         self._db.execute("INSERT OR IGNORE INTO done VALUES (1, 0, 0)")
+        events.prepare(self._db)
+        events.add(self._db, clock(), "started")
         self._db.commit()
 
     async def tick(self) -> None:
+        began = time.perf_counter()
+        try:
+            await self._tick()
+        finally:
+            self._measure(time.perf_counter() - began)
+            self._housekeeping()
+
+    def _measure(self, took: float) -> None:
+        m = self.metrics
+        m.set("gphoto.check.duration", took, "s", "Time of the last check")
+        files = size = 0
+        try:
+            with os.scandir(self.staging) as entries:
+                for entry in entries:
+                    if entry.is_file() and not entry.name.startswith("."):
+                        files += 1
+                        size += entry.stat().st_size
+        except OSError:
+            logger.warning("Cannot read staging", exc_info=True)
+        m.set("gphoto.staging.files", files, "{file}", "Copies in staging")
+        m.set("gphoto.staging.bytes", size, "By", "Size of staging")
+        m.save()
+
+    def _housekeeping(self) -> None:
+        try:
+            events.prune(self._db, self.clock())
+            self._db.commit()
+            day = datetime.fromtimestamp(self.clock()).strftime("%Y%m%d")
+            ops.backup(self._db, self._state / "backup", "google", day)
+        except (OSError, sqlite3.Error):
+            logger.exception("Backup failed")
+
+    def _note(self, bad: bool, down: str, up: str, detail: str | None = None) -> None:
+        """Record trouble and the end of it once each, also across restarts."""
+        last = events.last_kind(self._db, down, up)
+        if bad and last != down:
+            events.add(self._db, self.clock(), down, detail=detail)
+        elif not bad and last == down:
+            events.add(self._db, self.clock(), up)
+        self._db.commit()
+
+    async def _tick(self) -> None:
         try:
             state = await self.chrome.check()
         except Exception as error:
             logger.exception("Check failed")
-            self._health(False, None, str(error) or type(error).__name__)
+            text = str(error) or type(error).__name__
+            self._note(True, "chrome_down", "chrome_up", text)
+            self._health(False, None, text)
+            self.metrics.set("gphoto.signed_in", 0, "1", "Google Photos is signed in")
             return
+        self._note(False, "chrome_down", "chrome_up")
+        self._note(not state.signed_in, "signed_out", "signed_in")
+        if state.signed_in:
+            self._note(state.folder != "granted", "folder_lost", "folder_ok", state.folder)
+        self.metrics.set("gphoto.signed_in", int(state.signed_in), "1", "Google Photos is signed in")
+        self.metrics.set(
+            "gphoto.folder_allowed", int(state.folder == "granted"), "1", "Chrome may read staging"
+        )
+        if state.version:
+            self.metrics.set("gphoto.chrome.info", 1, "1", "Chrome version", version=state.version)
         self._health(state.signed_in, state.folder, None)
         try:
             if not state.tab:
@@ -185,6 +248,7 @@ class Checker:
         self._db.execute(
             "UPDATE health SET search_error = ?, checked_at = ? WHERE id = 1", (error, self.clock())
         )
+        self._note(error is not None, "search_broken", "search_ok", error)
         self._db.commit()
 
     def _attach(self) -> bool:
@@ -242,8 +306,13 @@ class Checker:
             search = self._searches[day]
             search.next_at = self.clock() + search.delay
             search.delay = min(search.delay * 2, SEARCH_MOST)
+            began = time.perf_counter()
+            self.metrics.add("gphoto.searches", 1, "{search}", "Searches for arrivals")
             try:
                 labels = await self.chrome.labels_on(day)
+                self.metrics.record(
+                    "gphoto.search.duration", time.perf_counter() - began, "s", "Time of a search"
+                )
                 seen = Counter(t for t in map(read_label, labels) if t)
                 if labels and not seen:
                     raise RuntimeError(f"cannot read Google's dates, for example {labels[0]!r}")
@@ -265,11 +334,23 @@ class Checker:
                 "INSERT OR REPLACE INTO confirmed VALUES (?, ?)",
                 [(path, self.clock()) for path in sorted(found)],
             )
+            for path in sorted(found):
+                sent_at = self._db.execute(
+                    "SELECT sent_at FROM inc.incoming WHERE path = ?", (path,)
+                ).fetchone()[0]
+                took = max(0.0, self.clock() - sent_at)
+                self.metrics.record(
+                    "gphoto.arrival.duration", took, "s", "Sent until seen in Google", MINUTES
+                )
+                events.add(self._db, self.clock(), "seen", path)
             self._search_health(None)
             logger.info("%s: Google shows %d, confirmed %d", day, sum(seen.values()), len(found))
 
     async def _reload(self) -> None:
         self._reloaded = self.clock()
+        self.metrics.add("gphoto.reloads", 1, "{reload}", "Times the page was reloaded")
+        events.add(self._db, self.clock(), "reloaded")
+        self._db.commit()
         await self.chrome.reload_photos()
 
     async def _reload_if_due(self, every: float) -> bool:
@@ -281,7 +362,10 @@ class Checker:
 
     async def _refresh(self) -> None:
         """The page sometimes stops noticing new files, and can look signed in when it is not."""
-        oldest = self._db.execute(f"SELECT MIN(i.sent_at) {self._OUTSTANDING}").fetchone()[0]
+        oldest, left = self._db.execute(
+            f"SELECT MIN(i.sent_at), COUNT(*) {self._OUTSTANDING}"
+        ).fetchone()
+        self.metrics.set("gphoto.on_the_way", left, "{photo}", "Sent and not seen yet")
         if oldest is None:
             self._reload_delay = RELOAD_EVERY
             await self._reload_if_due(RELOAD_MOST)
@@ -312,6 +396,7 @@ class Checker:
             staged = self.staging / row["staged"] if row["staged"] else None
             if staged and staged.is_file() and _sha1(staged) == row["sha1"]:
                 staged.unlink()
+                events.add(self._db, now, "tidied", row["path"])
                 logger.info("Tidied %s", staged.name)
             self._db.execute("INSERT OR REPLACE INTO tidied VALUES (?, ?)", (row["path"], now))
         if old:
@@ -458,17 +543,18 @@ class ChromeDevTools:
 
     async def check(self) -> ChromeState:
         pages = await self._pages()
+        version = json.loads(await self._get("/json/version")).get("Browser", "")
         if not pages:
-            return ChromeState(tab=False, signed_in=False, folder=None)
+            return ChromeState(tab=False, signed_in=False, folder=None, version=version)
         photos = [t for t in pages if t["url"].startswith(PHOTOS_URL)]
         if not photos:
             # Signed out, Google sends the tab to a welcome, sign-in or consent page.
-            return ChromeState(tab=True, signed_in=False, folder=None)
+            return ChromeState(tab=True, signed_in=False, folder=None, version=version)
         async with self._connect(photos[0]) as link:
             session = _Session(link)
             signed_in = bool(await session.run(SIGNED_IN))
             folder = await session.run(FOLDER) if signed_in else None
-        return ChromeState(tab=True, signed_in=signed_in, folder=folder)
+        return ChromeState(tab=True, signed_in=signed_in, folder=folder, version=version)
 
     async def labels_on(self, day: date) -> list[str]:
         query = quote(f"{day.day} {day:%B} {day.year}")

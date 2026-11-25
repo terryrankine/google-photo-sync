@@ -52,16 +52,23 @@ services:
   # Waits, strips Nikon MPF from a copy, drops it in staging.
   gphoto-incoming:
     <<: *job
-    build: { context: "${SOURCE:-..}", dockerfile: gphoto/Dockerfile }
+    build:
+      context: ${SOURCE:-..}
+      dockerfile: gphoto/Dockerfile
+      args: ["VERSION=${GPHOTO_VERSION:-unknown}"]
     container_name: gphoto-incoming
     group_add: ["100"]
     network_mode: none
-    environment: ["TZ=${TZ:?}"]
+    environment:
+      - TZ=${TZ:?}
+      - SCRUB=${SCRUB:-}
+      - CAMERAS=${CAMERAS:-}
     volumes:
       - ${PHOTOS:?}:/photos:ro
       - ./staging:/staging
       - ./state:/state
-    command: ["python", "-m", "gphoto.incoming", "--root", "/photos", "--staging", "/staging", "--db", "/state/incoming.db", "--since", "${SINCE:?}", "--wait-hours", "${WAIT_HOURS:?}", "--interval", "300"]
+      - ./requests:/requests
+    command: ["python", "-m", "gphoto.incoming", "--root", "/photos", "--staging", "/staging", "--db", "/state/incoming.db", "--since", "${SINCE:?}", "--wait-hours", "${WAIT_HOURS:?}", "--interval", "300", "--requests", "/requests"]
 
   # Checks the browser, proves each photo arrived, tidies staging. No network.
   gphoto-google:
@@ -76,7 +83,8 @@ services:
       - ./control:/control
     command: ["python", "-m", "gphoto.google", "--socket", "/control/chrome.sock", "--state", "/state", "--staging", "/staging"]
 
-  # Status page. Sees the state read-only, not the photos and not the browser.
+  # Status page. Sees the state read-only, not the photos and not the browser. Buttons
+  # leave a request for gphoto-incoming, which checks it.
   gphoto-web:
     <<: *job
     container_name: gphoto-web
@@ -88,8 +96,13 @@ services:
       - CF_ACCESS_AUD=${CF_ACCESS_AUD:?}
       - ALLOWED_EMAIL=${ALLOWED_EMAIL:?}
       - CHROME_URL=https://${LAN_ADDRESS:?}:3941
+      - REQUESTS_DIR=/requests
+    # Standard OTEL_ variables. Export is off without OTEL_EXPORTER_OTLP_ENDPOINT.
+    env_file:
+      - { path: .env.otel, required: false }
     volumes:
       - ./state:/state:ro
+      - ./requests:/requests
     networks: [traefik]
     labels:
       - traefik.enable=true

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block body %}
+  <h1>History</h1>
+  <p class="beat">{% if path %}{{ path }}. <a href="/history">Show everything</a>
+    {% elif trouble %}Trouble only. <a href="/history">Show everything</a>
+    {% else %}The last 300 things, kept for 90 days. <a href="/history?trouble=true">Show trouble only</a>{% endif %}</p>
+  <div class="panel scroll" style="margin-top: 1.25rem">
+  {% if events %}
+  <table>
+    <thead><tr><th>When</th><th>What</th><th>Photo</th></tr></thead>
+    <tbody>
+    {% for e in events %}
+    <tr>
+      <td>{{ when(e.at) }}</td>
+      <td><span class="{{ 'stage failed' if e.trouble else '' }}">{{ "✕ " if e.trouble }}{{ e.words }}</span>{% if e.detail %}<small>{{ e.detail }}</small>{% endif %}</td>
+      <td>{% if e.path %}<a href="/history?path={{ e.path|urlencode }}">{{ e.path }}</a>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">Nothing has happened yet.</p>{% endif %}
+  </div>
+{% endblock %}

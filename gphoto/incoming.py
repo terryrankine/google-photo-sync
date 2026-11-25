@@ -1,10 +1,12 @@
-"""Incoming photos: wait, strip Nikon MPF, hand over to staging.
+"""Incoming photos: wait, scrub, hand over to staging.
 
 Google Photos keeps a D7100 JPEG at full size while it carries an MPF block.
 With the block gone the same photo is stored as Storage saver. A browser signed
 in to Google Photos watches the staging folder and does the upload.
 
 Phone files also carry MPF, but theirs is an HDR gain map. They are never touched.
+
+scrub.py says which tags may go. This checks that nothing else did.
 """
 
 from __future__ import annotations
@@ -26,25 +28,23 @@ from pathlib import Path
 
 from PIL import Image
 
+from gphoto import events, ops, scrub
+from gphoto.metrics import Metrics
+from gphoto.scrub import StripError
+
 logger = logging.getLogger(__name__)
 
 EXTENSIONS = {".jpg", ".jpeg"}
 IGNORED_DIRS = {"@eaDir", "#recycle", "@Recycle", "$RECYCLE.BIN"}
 TEMP_PREFIX = ".gphoto-"
-STRIPPABLE_MPF = "Large Thumbnail"
 EXIFTOOL_TIMEOUT = 120
 RETRY_AFTER = 15 * 60
 BEAT_EVERY = 60
+REQUEST_EVERY = 5
 FULL_PASS_EVERY = 24 * 3600
 # Longer than the 60 s an NFS client may keep a folder's old attributes.
 SETTLED_AFTER = 120
 FORGETTABLE = ("waiting", "failed", "look", "skipped", "dismissed")
-# Groups that describe the file on disk or the MPF block, not the photo.
-VOLATILE_GROUPS = {"SourceFile", "ExifTool", "System", "Composite", "MPF0"}
-
-
-class StripError(RuntimeError):
-    """The stripped copy failed a check. The original was left alone."""
 
 
 class RootUnavailable(RuntimeError):
@@ -62,10 +62,10 @@ class PhotoInfo:
     make: str
     taken: datetime | None
     mpf_types: tuple[str, ...]
+    found: frozenset[str] = frozenset()  # scrub groups that have something to remove
 
-    @property
-    def is_camera(self) -> bool:
-        return self.make.upper().startswith("NIKON")
+    def made_by(self, cameras: tuple[str, ...]) -> bool:
+        return self.make.upper().startswith(tuple(prefix.upper() for prefix in cameras))
 
 
 @dataclass(frozen=True)
@@ -82,59 +82,67 @@ def _exiftool(*args: str) -> bytes:
     return result.stdout
 
 
-def _tags(path: Path) -> dict[str, object]:
-    return json.loads(_exiftool("-j", "-G1", "-a", str(path)))[0]
+def _tags(path: Path, *options: str) -> dict[scrub.Tag, tuple[str, ...]]:
+    return scrub.read_tags(json.loads(_exiftool("-j", "-a", "-G0:1:4", *options, str(path)))[0])
+
+
+def _first(tags: scrub.Tags, *tag: str) -> str:
+    return next(iter(tags.get(scrub.Tag(*tag), ())), "")
 
 
 def inspect(path: Path) -> PhotoInfo:
     """Read what the rules need from one JPEG."""
     tags = _tags(path)
-    if tags.get("File:FileType") not in ("JPEG", "MPO"):
+    if _first(tags, "File", "File", "FileType") not in ("JPEG", "MPO"):
         raise ValueError(f"not a JPEG: {path}")
     taken = None
-    raw = tags.get("ExifIFD:DateTimeOriginal")
+    raw = _first(tags, "EXIF", "ExifIFD", "DateTimeOriginal")
     if raw:
         try:
-            taken = datetime.strptime(str(raw)[:19], "%Y:%m:%d %H:%M:%S")
+            taken = datetime.strptime(raw[:19], "%Y:%m:%d %H:%M:%S")
         except ValueError:
             logger.warning("Unreadable capture date %r in %s", raw, path)
-    extra = tuple(
-        str(value)
-        for key, value in sorted(tags.items())
-        if key.startswith("MPImage")
-        and key.endswith(":MPImageType")
-        and not key.startswith("MPImage1:")
+    return PhotoInfo(
+        make=_first(tags, "EXIF", "IFD0", "Make"),
+        taken=taken,
+        mpf_types=scrub.mpf_types(tags),
+        found=frozenset(scrub.Rules(tuple(scrub.GROUPS)).found(tags)),
     )
-    return PhotoInfo(make=str(tags.get("IFD0:Make", "")), taken=taken, mpf_types=extra)
 
 
-def decide(info: PhotoInfo, since: date) -> Decision:
+def decide(
+    info: PhotoInfo,
+    since: date,
+    cameras: tuple[str, ...] = scrub.DEFAULT_CAMERAS,
+    rules: scrub.Rules = scrub.DEFAULT_RULES,
+) -> Decision:
     """Strip, send or skip. Anything not understood is skipped."""
-    if not info.is_camera:
-        return Decision(Action.SKIP, f"not a Nikon ({info.make or 'no make'})")
+    if not info.made_by(cameras):
+        wanted = " or ".join(prefix.capitalize() for prefix in cameras)
+        return Decision(Action.SKIP, f"not a {wanted} ({info.make or 'no make'})")
     if info.taken is None:
         return Decision(Action.SKIP, "no capture date")
     if info.taken.date() < since:
         return Decision(Action.SKIP, f"taken before {since}")
-    if not info.mpf_types:
-        return Decision(Action.SEND, "no MPF")
-    unknown = [t for t in info.mpf_types if not t.startswith(STRIPPABLE_MPF)]
+    unknown = scrub.unknown_mpf(info.mpf_types)
     if unknown:
         return Decision(Action.SKIP, f"unknown MPF content: {', '.join(unknown)}")
-    return Decision(Action.STRIP, "Nikon MPF preview")
+    work = [name for name in rules.names if name in info.found]
+    if work == ["mpf"]:
+        return Decision(Action.STRIP, f"{info.make.split()[0].capitalize()} MPF preview")
+    if work:
+        return Decision(Action.STRIP, f"removing {', '.join(work)}")
+    nothing = "no MPF" if rules == scrub.DEFAULT_RULES else "nothing to remove"
+    return Decision(Action.SEND, nothing)
+
+
+def _remove(src: Path, dst: Path, arguments: list[str]) -> None:
+    # Through a pipe, because exiftool expands % codes in an output file name.
+    dst.write_bytes(_exiftool(*arguments, "-o", "-", str(src)))
 
 
 def _remove_mpf(src: Path, dst: Path) -> None:
-    # Through a pipe, because exiftool expands % codes in an output file name.
-    dst.write_bytes(_exiftool("-mpf:all=", "-trailer:all=", "-o", "-", str(src)))
-
-
-def _photo_tags(path: Path) -> dict[str, object]:
-    def keep(key: str) -> bool:
-        group = key.split(":", 1)[0]
-        return group not in VOLATILE_GROUPS and not group.startswith("MPImage")
-
-    return {key: value for key, value in _tags(path).items() if keep(key)}
+    _remove(src, dst, scrub.MPF_ARGUMENTS)
 
 
 def _pixels(path: Path) -> str:
@@ -147,38 +155,70 @@ def _fingerprint(path: Path) -> tuple[int, int]:
     return stat.st_size, stat.st_mtime_ns
 
 
-def strip_to(path: Path, target: Path) -> None:
-    """Write a copy of path without MPF. Raises if anything but MPF would differ."""
+def scrub_to(
+    path: Path, target: Path, rules: scrub.Rules = scrub.DEFAULT_RULES
+) -> list[str]:
+    """Write a copy of path without what the rules name. Returns the groups removed.
+
+    Raises, and leaves no file, if anything else would differ. With nothing to remove
+    the copy is the same bytes, because Google matches a photo on its bytes.
+    """
     before = path.stat()
     target.unlink(missing_ok=True)
     try:
-        _remove_mpf(path, target)
-        if _pixels(target) != _pixels(path):
-            raise StripError(f"pixels would change: {path}")
-        if _photo_tags(target) != _photo_tags(path):
-            raise StripError(f"tags other than MPF would change: {path}")
-        if inspect(target).mpf_types:
-            raise StripError(f"MPF still present: {path}")
+        old = _tags(path, "-b")
+        unknown = scrub.unknown_mpf(scrub.mpf_types(old))
+        if unknown:
+            raise StripError(f"unknown MPF content: {', '.join(unknown)}")
+        done = rules.found(old)
+        if done:
+            _scrub_checked(path, target, scrub.Rules(tuple(done)), old)
+        else:
+            shutil.copyfile(path, target)
         with target.open("rb+") as handle:
             os.fsync(handle.fileno())
         os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
         if _fingerprint(path) != (before.st_size, before.st_mtime_ns):
-            raise StripError(f"file changed while stripping: {path}")
+            raise StripError("file changed while stripping")
+        return done
+    except StripError as error:
+        target.unlink(missing_ok=True)
+        raise StripError(f"{error}: {path}") from error
     except BaseException:
         target.unlink(missing_ok=True)
         raise
 
 
-def strip_in_place(path: Path) -> None:
-    """Remove the MPF block. Replaces the file only if the photo is provably unchanged.
+def _scrub_checked(path: Path, target: Path, rules: scrub.Rules, old: scrub.Tags) -> None:
+    arguments = rules.arguments(old)
+    only_mpf = arguments == scrub.MPF_ARGUMENTS
+    if only_mpf:
+        _remove_mpf(path, target)
+    else:
+        _remove(path, target, arguments)
+    if _pixels(target) != _pixels(path):
+        raise StripError("pixels would change")
+    new = _tags(target, "-b")
+    rules.check_gone(new)
+    rules.check(old, new)
+    if not only_mpf:
+        # Unknown tags and embedded images too, where a leftover would go unseen.
+        rules.check_gone(_tags(target, "-u", "-U", "-ee"))
+        rules.check_serial_text(old, target.read_bytes())
+
+
+def strip_in_place(path: Path, rules: scrub.Rules = scrub.DEFAULT_RULES) -> list[str]:
+    """Scrub the file itself. Replaces it only if the photo is provably unchanged.
 
     Permissions are not copied. chmod on a Synology share would replace the
     inherited ACL, and a new file in the folder inherits the right one.
     """
     temp = path.with_name(f"{TEMP_PREFIX}{path.name}")
     try:
-        strip_to(path, temp)
-        os.replace(temp, path)
+        done = scrub_to(path, temp, rules)
+        if done:
+            os.replace(temp, path)
+        return done
     finally:
         temp.unlink(missing_ok=True)
 
@@ -220,6 +260,9 @@ class Runner:
         landed_at: Callable[[Path], float] = _ctime,
         dry_run: bool = False,
         in_place: bool = False,
+        requests: Path | None = None,
+        rules: scrub.Rules = scrub.DEFAULT_RULES,
+        cameras: tuple[str, ...] = scrub.DEFAULT_CAMERAS,
     ) -> None:
         self.root = root
         self.staging = staging
@@ -229,10 +272,17 @@ class Runner:
         self.landed_at = landed_at
         self.dry_run = dry_run
         self.in_place = in_place
+        self.requests = requests
+        self.rules = rules
+        self.cameras = cameras
+        self._state = db_path.parent
+        self.metrics = Metrics("incoming", self._state, clock)
+        self._listed = self._checked = 0
         self._cutoff = datetime.combine(since, datetime.min.time()).timestamp()
         self._folders: dict[str, _Folder] = {}
         self._full_at = float("-inf")
         self._beat_at = float("-inf")
+        self._announced = False
         self._work = db_path.parent / "work"
         self._work.mkdir(exist_ok=True)
         self._db = sqlite3.connect(db_path, timeout=30)
@@ -264,7 +314,13 @@ class Runner:
             "CREATE TABLE IF NOT EXISTS heartbeat"
             " (id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL, error TEXT)"
         )
+        events.prepare(self._db)
         self._db.commit()
+
+    def _event(self, kind: str, path: str | None = None, detail: str | None = None,
+               at: float | None = None) -> None:
+        if not self.dry_run:
+            events.add(self._db, self.clock() if at is None else at, kind, path, detail)
 
     # --- what the owner can do -------------------------------------------------
 
@@ -274,30 +330,92 @@ class Runner:
 
     def retry(self, relative: str) -> bool:
         """Send this photo again at the next pass."""
-        return self._set(relative, "waiting", landed=0)
+        return self._set("retry", relative, "waiting", landed=0)
 
     def dismiss(self, relative: str) -> bool:
         """Stop showing this photo as a problem."""
-        return self._set(relative, "dismissed")
+        return self._set("dismiss", relative, "dismissed")
 
-    def _set(self, relative: str, status: str, landed: float | None = None) -> bool:
+    def take_requests(self) -> bool:
+        """Act on what was asked on the page. Returns whether anything was done."""
+        if self.requests is None:
+            return False
+        act = {"retry": self.retry, "dismiss": self.dismiss}
+        return any([act[action](path) for action, path in ops.read_requests(self.requests)])
+
+    def _set(self, kind: str, relative: str, status: str, landed: float | None = None) -> bool:
         done = self._db.execute(
             "UPDATE incoming SET status = ?, landed = COALESCE(?, landed), reason = NULL,"
             " retry_at = NULL, sha1 = NULL WHERE path = ?",
             (status, landed, relative),
         ).rowcount
+        if done:
+            self._event(kind, relative)
         self._db.commit()
         return bool(done)
+
+    def refuse(self, why: str) -> None:
+        """Say on the page that the settings are wrong."""
+        self._beat(why)
 
     # --- one pass ----------------------------------------------------------------
 
     def tick(self) -> None:
+        began = time.perf_counter()
+        self._listed = self._checked = 0
         try:
             problems = self._pass()
         except Exception as error:
+            self._note("nas" if isinstance(error, RootUnavailable) else "pass", str(error))
             self._beat(str(error) or type(error).__name__)
+            self._measure(began, 1)
             raise
-        self._beat(f"{len(problems)} not read, first: {problems[0]}" if problems else None)
+        text = f"{len(problems)} not read, first: {problems[0]}" if problems else None
+        self._note("pass", text)
+        self._beat(text)
+        self._measure(began, len(problems))
+        self._housekeeping()
+
+    def _note(self, what: str, trouble: str | None) -> None:
+        """Record trouble and the end of it once each, also across restarts."""
+        if what == "nas":
+            if events.last_kind(self._db, "nas_down", "nas_up") != "nas_down":
+                self._event("nas_down", detail=trouble)
+            return
+        if events.last_kind(self._db, "nas_down", "nas_up") == "nas_down":
+            self._event("nas_up")
+        last = events.last_kind(self._db, "pass_error", "pass_ok")
+        if trouble and last != "pass_error":
+            self._event("pass_error", detail=trouble)
+        elif not trouble and last == "pass_error":
+            self._event("pass_ok")
+        if not self._announced:
+            self._announced = True
+            self._event("started")
+
+    def _measure(self, began: float, problems: int) -> None:
+        m = self.metrics
+        m.set("gphoto.pass.duration", time.perf_counter() - began, "s", "Time of the last pass")
+        m.set("gphoto.pass.folders_listed", self._listed, "{folder}", "Folders listed in it")
+        m.set("gphoto.pass.photos_checked", self._checked, "{photo}", "Photos asked about in it")
+        m.set("gphoto.pass.folders_known", len(self._folders), "{folder}", "Folders remembered")
+        m.set("gphoto.pass.problems", problems, "{folder}", "Places it could not read")
+        waiting = self._db.execute("SELECT COUNT(*) FROM incoming WHERE status = 'waiting'")
+        m.set("gphoto.waiting", waiting.fetchone()[0], "{photo}", "Photos waiting")
+        m.disk("state", self._state)
+        m.disk("staging", self.staging)
+        m.save()
+
+    def _housekeeping(self) -> None:
+        if self.dry_run:
+            return
+        try:
+            events.prune(self._db, self.clock())
+            self._db.commit()
+            day = datetime.fromtimestamp(self.clock()).strftime("%Y%m%d")
+            ops.backup(self._db, self._state / "backup", "state", day)
+        except (OSError, sqlite3.Error):
+            logger.exception("Backup failed")
 
     def _beat(self, error: str | None) -> None:
         self._beat_at = self.clock()
@@ -374,6 +492,8 @@ class Runner:
         if known and not always and known.mtime_ns == mtime_ns:
             return known.subfolders
         names, subfolders = self._list(folder)
+        self._listed += 1
+        self._checked += len(names)
         if not relative:
             subfolders = [n for n in subfolders if not self._is_old_year(n)]
         self._look_at(folder, relative, names, problems)
@@ -440,6 +560,10 @@ class Runner:
 
     def _delete(self, paths: list[str]) -> None:
         if paths and not self.dry_run:
+            for path in paths:
+                row = self._row(path)
+                if row and row["status"] in ("waiting", "failed", "look"):
+                    self._event("gone", path)
             self._db.executemany("DELETE FROM incoming WHERE path = ?", [(p,) for p in paths])
             self._db.commit()
 
@@ -464,6 +588,9 @@ class Runner:
             reason = str(error) or type(error).__name__
             try:
                 if passing:
+                    known = self._row(relative)
+                    if known and known["reason"] != reason:
+                        self._event("retrying", relative, reason)
                     self._db.execute(
                         "UPDATE incoming SET reason = ?, retry_at = ?"
                         " WHERE path = ? AND status = 'waiting'",
@@ -497,6 +624,7 @@ class Runner:
                 " VALUES (?, ?, ?, ?, 'waiting')",
                 (relative, size, mtime_ns, landed),
             )
+            self._event("landed", relative, at=landed)
             # Saved once per folder. A bulk copy would otherwise save once per file.
             retry_at = 0.0
         else:
@@ -512,6 +640,7 @@ class Runner:
                     " sent_at = NULL WHERE path = ?",
                     (size, mtime_ns, now, relative),
                 )
+                self._event("changed", relative)
                 self._db.commit()
                 return
             if row["status"] != "waiting":
@@ -555,22 +684,28 @@ class Runner:
         # A pass over many photos takes longer than the status page allows for.
         self._still_alive()
         info = inspect(path)
-        decision = decide(info, self.since)
+        decision = decide(info, self.since, self.cameras, self.rules)
         if self.dry_run:
             logger.info("Would %s %s (%s)", decision.action.value, relative, decision.reason)
             return
         if decision.action is Action.SKIP:
             logger.info("Skip %s (%s)", relative, decision.reason)
-            status = "look" if info.is_camera else "skipped"
+            status = "look" if info.made_by(self.cameras) else "skipped"
             self._finish(path, relative, status, decision.reason)
             return
         source = path
+        began = time.perf_counter()
         try:
             if decision.action is Action.STRIP and self.in_place:
-                strip_in_place(path)
+                done = strip_in_place(path, self.rules)
             elif decision.action is Action.STRIP:
                 source = self._work / path.name
-                strip_to(path, source)
+                done = scrub_to(path, source, self.rules)
+            if decision.action is Action.STRIP:
+                took = time.perf_counter() - began
+                self.metrics.record("gphoto.scrub.duration", took, "s", "Time to clean a copy")
+                # The event carries the time cleaning began, so that its length can be seen.
+                self._event("scrubbed", relative, ", ".join(done), at=self.clock() - took)
             self._send(path, relative, source, info, decision.reason)
         finally:
             if source is not path:
@@ -622,7 +757,18 @@ class Runner:
             " retry_at = NULL WHERE path = ?",
             (size, mtime_ns, status, reason, sha1, relative),
         )
+        kind = "skipped" if status == "duplicate" else status
+        self._event(kind, relative, reason)
         self._db.commit()
+        self.metrics.add("gphoto.photos", 1, "{photo}", "Photos handled", outcome=status)
+
+
+def wait(runner: Runner, seconds: float) -> None:
+    """Sleep until the next pass, or until something asked on the page has been done."""
+    for _ in range(max(1, int(seconds / REQUEST_EVERY))):
+        time.sleep(REQUEST_EVERY)
+        if runner.take_requests():
+            return
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -637,6 +783,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--in-place", action="store_true", help="strip the NAS file too, needs write access"
     )
+    parser.add_argument("--requests", type=Path, help="folder the status page writes to")
     parser.add_argument("--retry", metavar="PATH", help="send this photo again, then exit")
     parser.add_argument("--dismiss", metavar="PATH", help="stop flagging this photo, then exit")
     args = parser.parse_args(argv)
@@ -646,7 +793,16 @@ def main(argv: list[str] | None = None) -> int:
     runner = Runner(
         root=args.root, staging=args.staging, db_path=args.db, since=args.since,
         wait_seconds=args.wait_hours * 3600, dry_run=args.dry_run, in_place=args.in_place,
+        requests=args.requests,
     )
+    try:
+        settings = scrub.from_env()
+    except ValueError as error:
+        # Shown on the page, because a container that keeps stopping says nothing there.
+        logger.error("%s", error)
+        runner.refuse(str(error))
+        return 1
+    runner.rules, runner.cameras = settings.rules, settings.cameras
     if args.retry or args.dismiss:
         known = runner.retry(args.retry) if args.retry else runner.dismiss(args.dismiss)
         if not known:
@@ -661,7 +817,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if not args.interval:
             return 0
-        time.sleep(args.interval)
+        wait(runner, args.interval)
 
 
 if __name__ == "__main__":
