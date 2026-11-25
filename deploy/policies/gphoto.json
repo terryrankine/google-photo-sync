@@ -1,0 +1,7 @@
+{
+  "SyncDisabled": true,
+  "PasswordManagerEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "ExtensionSettings": { "*": { "installation_mode": "blocked" } }
+}

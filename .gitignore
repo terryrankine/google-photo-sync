@@ -1,6 +1,13 @@
 # Local config (not committed)
 CLAUDE.local.md
-deploy.env
+.env
+.env.*
+!.env.example
+/deploy/config/
+/deploy/staging/
+/deploy/state/
+/deploy/control/
+/deploy/src/
 
 # Python
 __pycache__/
@@ -48,13 +55,9 @@ token.json
 # Node
 node_modules/
 
-# Build output
-frontend/dist/
-web/static/assets/
-
 # Local directories
 data/
-config/
+/config/
 photos/
 test_photos/
 test_images/

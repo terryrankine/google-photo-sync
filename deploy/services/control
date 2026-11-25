@@ -1,0 +1,42 @@
+#!/usr/bin/with-contenv bash
+# Chrome's control port listens on 127.0.0.1 in this container only. This hands it to
+# the checker as a socket file that only uid 1000 can open, so nothing on a network,
+# and no other process on the host, can drive the signed-in browser.
+exec s6-setuidgid abc python3 - <<'EOF'
+import asyncio
+import os
+
+SOCKET = "/control/chrome.sock"
+
+
+async def pipe(reader, writer):
+    try:
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+    except (ConnectionError, asyncio.IncompleteReadError):
+        pass
+    finally:
+        writer.close()
+
+
+async def serve(reader, writer):
+    try:
+        upstream_reader, upstream_writer = await asyncio.open_connection("127.0.0.1", 9222)
+    except OSError:
+        writer.close()
+        return
+    await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
+
+
+async def main():
+    if os.path.exists(SOCKET):
+        os.unlink(SOCKET)
+    os.umask(0o177)
+    server = await asyncio.start_unix_server(serve, SOCKET)
+    async with server:
+        await server.serve_forever()
+
+
+asyncio.run(main())
+EOF

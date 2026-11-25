@@ -1,0 +1,18 @@
+#!/bin/bash
+# The image only clears stale locks in the default profile folder.
+rm -f /config/gprofile/Singleton*
+
+# The image starts Chrome once. Closing the window would stop photos until a restart.
+for desktop in labwc openbox; do
+  mkdir -p "/config/.config/$desktop"
+  cat > "/config/.config/$desktop/autostart" <<'EOF'
+#!/bin/bash
+while true; do
+  rm -f /config/gprofile/Singleton*
+  wrapped-chrome ${CHROME_CLI}
+  sleep 5
+done
+EOF
+  chmod +x "/config/.config/$desktop/autostart"
+  chown -R abc:abc "/config/.config/$desktop"
+done

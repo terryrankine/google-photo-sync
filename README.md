@@ -1,198 +1,61 @@
-# Google Photos Sync Tool
+# gphoto
 
-A NAS-native tool for syncing photos to Google Photos with intelligent duplicate detection and a web dashboard.
+Copy camera photos to the NAS. About 4 hours later they are in Google Photos, shrunk by Google, on the day they were taken.
 
-## Features
+## Why it works this way
 
-- **Fast incremental sync**: Uses file mtime + size to skip unchanged files (no rehashing)
-- **Content-based deduplication**: SHA256 hashing detects duplicates across directories
-- **Server-side dedup**: Leverages Google Photos' built-in duplicate detection
-- **Web dashboard**: Real-time progress, statistics, and configuration
-- **Batch management**: Pause, resume, cancel sync operations
-- **Docker-ready**: Easy deployment on Synology, TrueNAS, or any NAS
+- Google's public API stores full size only. Google shrinks photos for its own apps, so a real Chrome does the upload with "Back up folders".
+- Google refuses to shrink a Nikon D7100 JPEG that carries an MPF block. Without the block, a 9.5 MB photo became 663 KB. The block holds a small preview of the same photo. It is removed from the copy that is sent.
+- Phone photos are left alone. The phone sends its own, and its MPF block is an HDR gain map.
+- The 4 hours are for deleting bad shots. They count from when the file lands on the NAS.
 
-## Quick Start
+## Parts
 
-### 1. Clone and Configure
+| Container | Job | Can reach |
+|---|---|---|
+| `gphoto-incoming` | Finds photos, waits, strips a copy, puts it in `staging` | NAS read-only, no network |
+| `gphoto-chrome` | Google Photos, signed in, watching `staging` | Internet, LAN desktop on port 3941 |
+| `gphoto-google` | Checks Chrome, proves arrival, tidies `staging` | Chrome by a socket file, no network |
+| `gphoto-web` | Status page | State read-only |
 
-```bash
-git clone <repo-url>
-cd google-photo-container
+Each database has one writer: `incoming.db` and `google.db`, both in `state/`.
 
-# Create directories
-mkdir -p config data
-```
+## How the NAS is watched
 
-### 2. Set Up Google API Credentials
+NFS does not report changes made by other machines, so it polls every 5 minutes. A folder is listed only if its modified time moved, or if a photo in it is waiting. Everything is listed once a day. Year folders before `SINCE` are skipped. A file's content is read only when it is due to go.
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project
-3. Enable "Photos Library API"
-4. Create OAuth 2.0 credentials (Desktop app)
-5. Download `credentials.json` to `./config/`
+## What "In Google" means
 
-### 3. Configure Photo Directories
+Google Photos showed a photo at that capture second. A phone photo in the same second can stand in for it. Staged copies are removed 30 days after that, and only while nothing is missing. NAS files are never changed.
 
-Edit `docker-compose.yml` to mount your photo directories:
+## Set up
 
-```yaml
-volumes:
-  - ./config:/config
-  - ./data:/data
-  - /path/to/your/photos:/photos:ro
-```
+1. Copy `deploy/` to the Docker host. Copy `.env.example` to `.env` and fill it in. Set `SOURCE` to this repo.
+2. `mkdir -p config staging state control && docker compose up -d --build`
+3. Open `https://LAN_ADDRESS:3941`. Sign in to Google Photos. Choose Storage saver in Settings.
+4. Click **+**, **Back up folders**, and pick `/staging`.
+5. Restart `gphoto-chrome`. Click **+**, **Folder backup**, **Update permissions**, **Allow on every visit**.
 
-### 4. Run
+The status page needs Traefik and a Cloudflare Access application. The app checks the Access token itself, so going around Cloudflare is refused.
 
-```bash
-docker-compose up -d
-```
+## Runbook
 
-Open http://your-nas-ip:8080
+| Problem | Do |
+|---|---|
+| Anything odd, or after a host reboot | `docker compose up -d` |
+| Signed out, or folder permission lost | Open Chrome on port 3941 and follow the status page |
+| NAS check has not run | Check the NAS. A hard NFS mount waits for it, then carries on |
+| Send one photo again | `docker compose run --rm gphoto-incoming python -m gphoto.incoming --root /photos --staging /staging --db /state/incoming.db --since 2000-01-01 --retry "2026/folder/DSC_1.JPG"` |
+| Stop flagging a photo | The same with `--dismiss` |
+| Back up | Stop all four. Copy `state/` and `config/gprofile/`. Restore them as a pair |
+| `incoming.db` lost | Everything since `SINCE` is staged again with the same bytes. Google should match them, not tested |
+| Update Chrome | Back up first. Chrome profiles do not go back a version. Change `CHROME_IMAGE`, then `docker compose up -d` |
 
-### 5. Authenticate
+## Develop
 
-1. Check container logs: `docker-compose logs -f`
-2. Copy the Google auth URL from the logs
-3. Complete OAuth in your browser
-4. See [Setup guide](/setup) in the web UI for detailed instructions
-
-## How It Works
-
-### The Problem
-
-Google Drive's photo sync rescans your entire library every time, which is painfully slow for large collections.
-
-### The Solution
-
-```
-1. SCAN: stat() each file → compare mtime+size with database
-   └─ Unchanged? SKIP (microseconds per file)
-
-2. HASH: Compute SHA256 for new/changed files
-   └─ Hash already uploaded? SKIP (no network)
-
-3. UPLOAD: Send to Google Photos
-   └─ Google dedupes server-side (won't create duplicates)
-```
-
-### First Run
-
-- Uploads everything (Google dedupes on their end)
-- Populates local database with file metadata and hashes
-- Takes time proportional to your library size
-
-### Subsequent Runs
-
-- Only stat() calls for unchanged files
-- Only hash+upload for new/modified files
-- Typically completes in seconds for "nothing changed" case
-
-## Architecture
-
-```
-google-photo-container/
-├── src/
-│   ├── db.py          # SQLite database layer
-│   ├── scanner.py     # Filesystem scanner
-│   ├── hasher.py      # SHA256 computation (parallel)
-│   ├── uploader.py    # Google Photos API client
-│   ├── sync.py        # Orchestrator
-│   └── worker.py      # Background task processor
-├── web/
-│   ├── app.py         # FastAPI application
-│   ├── api.py         # REST API endpoints
-│   └── templates/     # Jinja2 templates (HTMX)
-├── config/            # Credentials and settings
-├── data/              # SQLite database
-└── docker-compose.yml
-```
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TZ` | `UTC` | Timezone |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
-| `CONFIG_DIR` | `/config` | Credentials directory |
-| `DATA_DIR` | `/data` | Database directory |
-
-### Web UI Settings
-
-- **Source directories**: Paths to scan for photos
-- **File extensions**: Which file types to sync
-- **Ignore patterns**: Directories/files to skip
-- **Parallel uploads**: Concurrent upload count (1-8)
-- **Hash workers**: Parallel hash computations (1-8)
-
-## API
-
-### Endpoints
-
-```
-GET  /api/status           # Current sync status
-GET  /api/batches          # List all batches
-POST /api/batches          # Start new sync
-GET  /api/batches/{id}     # Batch details
-POST /api/batches/{id}/pause
-POST /api/batches/{id}/resume
-POST /api/batches/{id}/cancel
-GET  /api/stats/overview   # Dashboard stats
-GET  /api/stats/daily      # Last 7 days
-GET  /api/config           # Current configuration
-PUT  /api/config           # Update configuration
-```
-
-## Limitations
-
-### Google Photos API (March 2025 Changes)
-
-- Apps can only read media items **they uploaded**
-- Cannot enumerate existing library
-- Cannot check "does this file exist in my library"
-- Workaround: Track uploads locally, rely on server-side dedup
-
-### Videos
-
-Google Photos does **not** deduplicate videos. First run may create duplicates if videos already exist in your library.
-
-## Troubleshooting
-
-### "Token expired" error
-
-Delete token and restart container to re-authenticate:
-```bash
-docker-compose exec gphoto-sync rm /config/token.json
-docker-compose restart gphoto-sync
-# Check logs for new auth URL
-```
-
-### Slow first run
-
-Expected. The tool must hash and upload your entire library once. Subsequent runs will be fast.
-
-### Database growing large
-
-Vacuum the SQLite database:
-```bash
-docker-compose exec gphoto-sync sqlite3 /data/gphoto_sync.db "VACUUM"
-```
-
-## Development
+Needs Python 3.12 and exiftool.
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run locally
-uvicorn web.app:app --reload --port 8080
-
-# Run tests
+pip install -r gphoto/requirements.txt pytest httpx
 pytest
 ```
-
-## License
-
-MIT

@@ -1,0 +1,110 @@
+# Camera photos from the NAS to Google Photos. See ../README.md.
+# Start and repair everything with: docker compose up -d
+name: gphoto-chrome
+
+x-logs: &logs
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+x-job: &job
+  image: gphoto:local
+  restart: unless-stopped
+  init: true
+  user: "1000:1000"
+  read_only: true
+  tmpfs: ["/tmp"]
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 512m
+  pids_limit: 100
+  logging: *logs
+
+services:
+  # Google Photos in a real browser. "Back up folders" watches /staging.
+  # Sign in once at https://LAN_ADDRESS:3941
+  gphoto-chrome:
+    image: ${CHROME_IMAGE:?}
+    container_name: gphoto-chrome
+    hostname: gphoto-chrome
+    restart: unless-stopped
+    shm_size: "1gb"
+    mem_limit: 3g
+    logging: *logs
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ:?}
+      - CUSTOM_USER=${CHROME_USER:?}
+      - PASSWORD=${CHROME_PASSWORD:?}
+      # The control port listens inside this container only. It needs a profile folder
+      # that is not Chrome's default. The language fixes how Google writes dates.
+      - CHROME_CLI=--remote-debugging-port=9222 --user-data-dir=/config/gprofile --lang=en-AU --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows https://photos.google.com/
+    ports:
+      - "${LAN_ADDRESS:?}:3941:3001"
+    volumes:
+      - ./config:/config
+      - ./staging:/staging
+      - ./control:/control
+      - ./init:/custom-cont-init.d:ro
+      - ./services:/custom-services.d:ro
+      - ./policies:/etc/opt/chrome/policies/managed:ro
+
+  # Waits, strips Nikon MPF from a copy, drops it in staging.
+  gphoto-incoming:
+    <<: *job
+    build: { context: "${SOURCE:-..}", dockerfile: gphoto/Dockerfile }
+    container_name: gphoto-incoming
+    group_add: ["100"]
+    network_mode: none
+    environment: ["TZ=${TZ:?}"]
+    volumes:
+      - ${PHOTOS:?}:/photos:ro
+      - ./staging:/staging
+      - ./state:/state
+    command: ["python", "-m", "gphoto.incoming", "--root", "/photos", "--staging", "/staging", "--db", "/state/incoming.db", "--since", "${SINCE:?}", "--wait-hours", "${WAIT_HOURS:?}", "--interval", "300"]
+
+  # Checks the browser, proves each photo arrived, tidies staging. No network.
+  gphoto-google:
+    <<: *job
+    container_name: gphoto-google
+    depends_on: [gphoto-incoming]
+    network_mode: none
+    environment: ["TZ=${TZ:?}"]
+    volumes:
+      - ./staging:/staging
+      - ./state:/state
+      - ./control:/control
+    command: ["python", "-m", "gphoto.google", "--socket", "/control/chrome.sock", "--state", "/state", "--staging", "/staging"]
+
+  # Status page. Sees the state read-only, not the photos and not the browser.
+  gphoto-web:
+    <<: *job
+    container_name: gphoto-web
+    depends_on: [gphoto-incoming]
+    environment:
+      - TZ=${TZ:?}
+      - WAIT_HOURS=${WAIT_HOURS:?}
+      - CF_ACCESS_TEAM=${CF_ACCESS_TEAM:?}
+      - CF_ACCESS_AUD=${CF_ACCESS_AUD:?}
+      - ALLOWED_EMAIL=${ALLOWED_EMAIL:?}
+      - CHROME_URL=https://${LAN_ADDRESS:?}:3941
+    volumes:
+      - ./state:/state:ro
+    networks: [traefik]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik
+      - traefik.http.routers.gphoto.rule=Host(`${SITE_HOST:?}`)
+      - traefik.http.routers.gphoto.entrypoints=websecure
+      - traefik.http.routers.gphoto.tls.certresolver=cloudflare
+      - traefik.http.services.gphoto.loadbalancer.server.port=8080
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    command: ["uvicorn", "--factory", "gphoto.web:from_env", "--host", "0.0.0.0", "--port", "8080", "--no-server-header", "--no-access-log"]
+
+networks:
+  traefik:
+    external: true
