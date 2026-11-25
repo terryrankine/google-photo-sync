@@ -195,6 +195,18 @@ def test_everything_is_looked_at_once_a_day(box, monkeypatch):
     assert box.folder.name in seen
 
 
+def test_a_bulk_copy_is_not_saved_one_file_at_a_time(box):
+    box.folder.mkdir(parents=True)
+    for n in range(300):
+        (box.folder / f"DSC_{n}.JPG").touch()
+    r = box.runner()
+    commits = []
+    r._db.set_trace_callback(lambda sql: commits.append(sql) if sql == "COMMIT" else None)
+    r.tick()
+    assert len(rows(box)) == 300
+    assert len(commits) < 10
+
+
 # --- faults that pass ----------------------------------------------------------
 
 
@@ -547,20 +559,100 @@ def test_page_lists_at_most_two_hundred_but_counts_all(state):
     assert s.counts["on the way"] == 250
 
 
-@pytest.mark.slow
-def test_a_hundred_thousand_photos_stay_quick(state):
-    import time
-
+def fill(state, count):
+    """Photos sent and proved over a long time, one a minute."""
     for db, sql in (
         ("incoming.db",
          "INSERT INTO incoming (path,size,mtime_ns,landed,status,sha1,taken,staged,sent_at)"
-         " WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000)"
-         " SELECT 'p'||i,1,1,1,'sent','s'||i,'2026-11-24T18:04:46','x',1 FROM n"),
+         f" WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{count})"
+         " SELECT 'p'||i,1,1,i,'sent','s'||i,'2026-11-24T18:04:46','x',"
+         f" {NOW} - ({count} - i) * 60 FROM n"),
         ("google.db",
-         "INSERT INTO confirmed WITH RECURSIVE n(i) AS"
-         " (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000) SELECT 'p'||i, 2 FROM n"),
+         f"INSERT INTO confirmed WITH RECURSIVE n(i) AS"
+         f" (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{count}) SELECT 'p'||i, {NOW} - ({count} - i) * 60 FROM n"),
     ):
         state._do(db, sql)
+
+
+def checker_on(state, chrome=None, now=NOW):
+    return google.Checker(
+        chrome=chrome or FakeChrome(), incoming_db=state.dir / "incoming.db",
+        db_path=state.dir / "google.db", staging=state.dir, clock=lambda: now,
+    )
+
+
+@pytest.mark.slow
+def test_two_hundred_thousand_sent_photos_stay_quick(state):
+    import time
+
+    fill(state, 200000)
+    c = checker_on(state)
+    run(c.tick())
     start = time.perf_counter()
-    assert state.read().counts["in Google"] == 100000
-    assert time.perf_counter() - start < 1.0
+    run(c.tick())
+    tick = time.perf_counter() - start
+    start = time.perf_counter()
+    assert state.read().counts["in Google"] == 200000
+    page = time.perf_counter() - start
+    assert (tick < 0.15, page < 0.15) == (True, True), (tick, page)
+
+
+def test_an_old_photo_that_never_arrived_is_not_lost_behind_newer_proof(state):
+    state.photo("old.JPG", sent_at=NOW - 40 * DAY)
+    for n in range(5):
+        state.photo(f"new{n}.JPG", sent_at=NOW - n * HOUR, confirmed=NOW)
+    for _ in range(3):
+        run(checker_on(state).tick())
+    s = state.read()
+    assert s.counts["on the way"] == 1
+    assert s.counts["in Google"] == 5
+
+
+def test_a_photo_sent_after_everything_was_proved_is_outstanding(state):
+    state.photo("a.JPG", sent_at=NOW - DAY, confirmed=NOW - DAY)
+    run(checker_on(state).tick())
+    state.photo("b.JPG", sent_at=NOW)
+    run(checker_on(state).tick())
+    assert state.read().counts == {
+        "waiting": 0, "on the way": 1, "in Google": 1, "skipped": 0, "needs a look": 0,
+        "failed": 0,
+    }
+
+
+def test_clock_set_back_does_not_hide_a_new_photo(state):
+    state.photo("a.JPG", sent_at=NOW, confirmed=NOW)
+    run(checker_on(state).tick())
+    state.photo("b.JPG", sent_at=NOW - 2 * HOUR)
+    run(checker_on(state).tick())
+    assert state.read().counts["on the way"] == 1
+
+
+def test_rows_without_a_send_time_still_count(state):
+    state.photo("legacy.JPG", sent_at=None)
+    run(checker_on(state).tick())
+    assert state.read().counts["on the way"] == 1
+
+
+def test_a_big_tidy_is_finished_over_several_checks(g):
+    import hashlib as h
+
+    data = h.sha1(b"x").hexdigest()
+    db = sqlite3.connect(g.box.db)
+    gdb = None
+    c = g.checker()
+    for n in range(1200):
+        (g.box.staging / f"t{n}.JPG").write_bytes(b"x")
+        db.execute(
+            "INSERT INTO incoming (path,size,mtime_ns,landed,status,sha1,taken,staged,sent_at)"
+            " VALUES (?,1,1,1,'sent',?,'2026-11-24T18:04:46',?,1)", (f"t{n}", data, f"t{n}.JPG"),
+        )
+    db.commit()
+    db.close()
+    gdb = sqlite3.connect(g.box.db.parent / "google.db")
+    gdb.executemany("INSERT INTO confirmed VALUES (?, ?)", [(f"t{n}", 2.0) for n in range(1200)])
+    gdb.commit()
+    gdb.close()
+    g.chrome.labels[g.day] = g.there * 1300
+    for _ in range(4):
+        run(c.tick())
+    assert not list(g.box.staging.glob("t*.JPG"))

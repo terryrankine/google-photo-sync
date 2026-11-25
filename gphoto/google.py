@@ -35,6 +35,7 @@ DAYS_PER_TICK = 3
 RELOAD_EVERY = 30 * 60
 RELOAD_MOST = 24 * 3600
 TIDY_AFTER = 30 * 24 * 3600
+SETTLE_SLACK = 24 * 3600
 CALL_TIMEOUT = 120
 MONTHS = {
     m: i
@@ -133,6 +134,14 @@ class Checker:
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS tidied (path TEXT PRIMARY KEY, at REAL NOT NULL)"
         )
+        self._db.execute("CREATE INDEX IF NOT EXISTS confirmed_at ON confirmed (at)")
+        # Every photo sent before 'settled' is proved, and every proof before 'tidied' is
+        # tidied, so neither has to be looked at again.
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS done (id INTEGER PRIMARY KEY CHECK (id = 1),"
+            " settled REAL NOT NULL, tidied REAL NOT NULL)"
+        )
+        self._db.execute("INSERT OR IGNORE INTO done VALUES (1, 0, 0)")
         self._db.commit()
 
     async def tick(self) -> None:
@@ -152,6 +161,7 @@ class Checker:
             elif self._attach():
                 try:
                     await self._confirm()
+                    self._settle()
                     await self._refresh()
                     if state.folder == "granted":
                         self._tidy()
@@ -190,9 +200,21 @@ class Checker:
     # Proof made before a photo was sent belongs to an earlier photo at the same path.
     _OUTSTANDING = (
         " FROM inc.incoming i LEFT JOIN confirmed c"
-        " ON c.path = i.path AND c.at >= COALESCE(i.sent_at, 0)"
-        " WHERE i.status = 'sent' AND i.taken <> '' AND c.path IS NULL"
+        " ON c.path = i.path AND c.at >= i.sent_at"
+        " WHERE i.status = 'sent' AND i.sent_at >= (SELECT settled FROM done)"
+        " AND i.taken <> '' AND c.path IS NULL"
     )
+
+    def _settle(self) -> None:
+        oldest = self._db.execute(f"SELECT MIN(i.sent_at) {self._OUTSTANDING}").fetchone()[0]
+        if oldest is None:
+            oldest = self._db.execute(
+                "SELECT MAX(sent_at) FROM inc.incoming WHERE status = 'sent'"
+            ).fetchone()[0]
+        if oldest is not None:
+            # A day of slack, in case the clock is set back.
+            self._db.execute("UPDATE done SET settled = MAX(settled, ?)", (oldest - SETTLE_SLACK,))
+            self._db.commit()
 
     def _outstanding(self) -> dict[date, set[str]]:
         days: dict[date, set[str]] = defaultdict(set)
@@ -279,10 +301,11 @@ class Checker:
             return
         now = self.clock()
         old = self._db.execute(
-            "SELECT i.path, i.staged, i.sha1 FROM inc.incoming i JOIN confirmed c"
-            " ON c.path = i.path AND c.at >= COALESCE(i.sent_at, 0)"
-            " LEFT JOIN tidied t ON t.path = i.path AND t.at >= c.at"
-            " WHERE i.status = 'sent' AND c.at <= ? AND t.path IS NULL LIMIT 500",
+            "SELECT i.path, i.staged, i.sha1, c.at FROM confirmed c CROSS JOIN inc.incoming i"
+            " LEFT JOIN tidied t ON t.path = c.path AND t.at >= c.at"
+            " WHERE c.at >= (SELECT tidied FROM done) AND c.at <= ? AND i.path = c.path"
+            " AND i.status = 'sent' AND c.at >= i.sent_at AND t.path IS NULL"
+            " ORDER BY c.at LIMIT 500",
             (now - TIDY_AFTER,),
         ).fetchall()
         for row in old:
@@ -291,6 +314,8 @@ class Checker:
                 staged.unlink()
                 logger.info("Tidied %s", staged.name)
             self._db.execute("INSERT OR REPLACE INTO tidied VALUES (?, ?)", (row["path"], now))
+        if old:
+            self._db.execute("UPDATE done SET tidied = ?", (old[-1]["at"],))
         self._db.commit()
 
 

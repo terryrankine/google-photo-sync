@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,18 +18,12 @@ STAGES = ("waiting", "on the way", "in Google", "skipped", "needs a look", "fail
 RESTART = "On the Docker host run: docker compose up -d"
 
 # Proof made before a photo was sent belongs to an earlier photo at the same path.
-STAGE_SQL = """
-    CASE i.status
-      WHEN 'waiting' THEN 'waiting'
-      WHEN 'failed' THEN 'failed'
-      WHEN 'look' THEN 'needs a look'
-      WHEN 'sent' THEN CASE WHEN c.path IS NULL THEN 'on the way' ELSE 'in Google' END
-      ELSE 'skipped' END AS stage
+# The checker notes the time before which every sent photo is proved.
+ON_THE_WAY = """
+    FROM incoming i LEFT JOIN goo.confirmed c ON c.path = i.path AND c.at >= i.sent_at
+    WHERE i.status = 'sent' AND i.sent_at >= (SELECT settled FROM goo.done) AND c.path IS NULL
 """
-FROM_SQL = """
-    FROM incoming i LEFT JOIN goo.confirmed c
-      ON c.path = i.path AND c.at >= COALESCE(i.sent_at, 0)
-"""
+STAGE_OF = {"waiting": "waiting", "failed": "failed", "look": "needs a look"}
 
 
 @dataclass(frozen=True)
@@ -153,8 +148,7 @@ def _photo_problems(
             )
         )
     late = db.execute(
-        f"SELECT COUNT(*) {FROM_SQL} WHERE i.status = 'sent' AND c.path IS NULL AND i.sent_at < ?",
-        (now - ARRIVAL_LATE,),
+        f"SELECT COUNT(*) {ON_THE_WAY} AND i.sent_at < ?", (now - ARRIVAL_LATE,)
     ).fetchone()[0]
     if late:
         problems.append(
@@ -166,33 +160,47 @@ def _photo_problems(
     return problems
 
 
-def _photo(row: sqlite3.Row, wait_seconds: float) -> Photo:
+def _photo(row: sqlite3.Row, stage: str, confirmed: float | None, wait_seconds: float) -> Photo:
     folder, _, name = row["path"].rpartition("/")
     due = max(row["landed"] + wait_seconds, row["retry_at"] or 0)
     return Photo(
-        name=name, folder=folder, stage=row["stage"], taken=row["taken"] or None,
-        landed=row["landed"], due=due if row["stage"] == "waiting" else None,
-        sent_at=row["sent_at"], confirmed_at=row["confirmed_at"], reason=row["reason"],
+        name=name, folder=folder, stage=stage, taken=row["taken"] or None,
+        landed=row["landed"], due=due if stage == "waiting" else None,
+        sent_at=row["sent_at"], confirmed_at=confirmed, reason=row["reason"],
     )
 
 
 def _recent(db: sqlite3.Connection, wait_seconds: float) -> list[Photo]:
-    """What needs attention first, then the newest. One indexed query per group."""
-    found: list[sqlite3.Row] = []
-    for where in (
-        "i.status IN ('failed', 'look')",
-        "i.status = 'waiting'",
-        "i.status = 'sent' AND c.path IS NULL",
-        "i.status = 'sent' AND c.path IS NOT NULL",
-        "i.status IN ('skipped', 'duplicate', 'dismissed')",
-    ):
-        if len(found) < RECENT:
-            found += db.execute(
-                f"SELECT i.*, c.at AS confirmed_at, {STAGE_SQL} {FROM_SQL} WHERE {where}"
-                " ORDER BY i.landed DESC, i.path LIMIT ?",
-                (RECENT - len(found),),
+    """What needs attention first, then the newest. Every query is indexed and limited."""
+    photos: list[Photo] = []
+
+    def newest(*statuses: str) -> list[sqlite3.Row]:
+        rows: list[sqlite3.Row] = []
+        for status in statuses:
+            rows += db.execute(
+                "SELECT * FROM incoming WHERE status = ? ORDER BY landed DESC LIMIT ?",
+                (status, RECENT),
             ).fetchall()
-    return [_photo(row, wait_seconds) for row in found]
+        return sorted(rows, key=lambda r: (-r["landed"], r["path"]))
+
+    def add(rows: list[sqlite3.Row], stage: Callable[[sqlite3.Row], str]) -> None:
+        photos.extend(_photo(r, stage(r), None, wait_seconds) for r in rows)
+
+    add(newest("failed", "look"), lambda r: STAGE_OF[r["status"]])
+    add(newest("waiting"), lambda r: "waiting")
+    way = db.execute(
+        f"SELECT i.* {ON_THE_WAY} ORDER BY i.landed DESC, i.path LIMIT ?", (RECENT,)
+    ).fetchall()
+    add(way, lambda r: "on the way")
+    on_the_way = {r["path"] for r in way}
+    for row in newest("sent"):
+        proof = db.execute(
+            "SELECT at FROM goo.confirmed WHERE path = ? AND at >= ?", (row["path"], row["sent_at"])
+        ).fetchone()
+        if proof and row["path"] not in on_the_way:
+            photos.append(_photo(row, "in Google", proof["at"], wait_seconds))
+    add(newest("skipped", "duplicate", "dismissed"), lambda r: "skipped")
+    return photos[:RECENT]
 
 
 def read(state: Path, now: float, wait_seconds: float) -> Status:
@@ -212,8 +220,11 @@ def read(state: Path, now: float, wait_seconds: float) -> Status:
         db.execute("ATTACH ? AS goo", (f"{(state / 'google.db').absolute().as_uri()}?mode=ro",))
         health = db.execute("SELECT * FROM goo.health").fetchone()
         last_arrival = db.execute("SELECT MAX(at) FROM goo.confirmed").fetchone()[0]
-        for row in db.execute(f"SELECT {STAGE_SQL}, COUNT(*) AS n {FROM_SQL} GROUP BY stage"):
-            counts[row["stage"]] = row["n"]
+        for row in db.execute("SELECT status, COUNT(*) AS n FROM incoming GROUP BY status"):
+            sent = "in Google" if row["status"] == "sent" else "skipped"
+            counts[STAGE_OF.get(row["status"], sent)] += row["n"]
+        counts["on the way"] = db.execute(f"SELECT COUNT(*) {ON_THE_WAY}").fetchone()[0]
+        counts["in Google"] -= counts["on the way"]
         photos = _recent(db, wait_seconds)
         photo_problems = _photo_problems(db, counts, now, wait_seconds)
     except (sqlite3.Error, IndexError):

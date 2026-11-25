@@ -251,10 +251,15 @@ class Runner:
         ):
             if column not in have:
                 self._db.execute(f"ALTER TABLE incoming ADD COLUMN {column} {kind}")
-        for column in ("status", "sha1", "taken"):
-            self._db.execute(
-                f"CREATE INDEX IF NOT EXISTS incoming_{column} ON incoming ({column})"
-            )
+        # Rows from before sent_at existed. Queries rely on it being set.
+        self._db.execute(
+            "UPDATE incoming SET sent_at = landed WHERE status = 'sent' AND sent_at IS NULL"
+        )
+        for name, columns in (
+            ("landed", "status, landed"), ("sent", "status, sent_at"),
+            ("day", "status, taken"), ("sha1", "sha1"),
+        ):
+            self._db.execute(f"CREATE INDEX IF NOT EXISTS incoming_{name} ON incoming ({columns})")
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS heartbeat"
             " (id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL, error TEXT)"
@@ -409,6 +414,7 @@ class Runner:
             present.add(path)
             self._still_alive()
             self._safely(folder / name, path, rows.get(path))
+        self._db.commit()
         gone = [p for p, r in rows.items() if p not in present and r["status"] in FORGETTABLE]
         self._delete(gone)
 
@@ -491,7 +497,7 @@ class Runner:
                 " VALUES (?, ?, ?, ?, 'waiting')",
                 (relative, size, mtime_ns, landed),
             )
-            self._db.commit()
+            # Saved once per folder. A bulk copy would otherwise save once per file.
             retry_at = 0.0
         else:
             if row["status"] in ("sent", "duplicate") and row["taken"] is None:
@@ -512,6 +518,7 @@ class Runner:
                 return
             landed, retry_at = row["landed"], row["retry_at"] or 0.0
         if now - landed >= self.wait_seconds and now >= retry_at:
+            self._db.commit()
             self._process(path, relative)
 
     def _is_new_photo(

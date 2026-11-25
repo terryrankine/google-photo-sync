@@ -354,7 +354,7 @@ class State:
             "incoming.db",
             "INSERT INTO incoming (path, size, mtime_ns, landed, status, reason, sha1, taken,"
             " staged, sent_at) VALUES (?, 1, 1, ?, ?, 'why', 'x', '2026-11-24T18:04:46', ?, ?)",
-            path, landed, state, name, sent_at,
+            path, landed, state, name, sent_at if state != "sent" else sent_at or landed,
         )
         if confirmed:
             self._do("google.db", "INSERT INTO confirmed VALUES (?, ?)", path, confirmed)
