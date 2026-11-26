@@ -11,7 +11,7 @@ import pytest
 
 from gphoto import events, google, incoming, metrics, ops, scrub, status
 from tests.test_faults import checker_on, rows
-from tests.test_incoming import HOUR, Box, make_jpeg
+from tests.test_incoming import HOUR, Box, has_mpf, make_jpeg
 from tests.test_product import DAY, MIN, NOW, Google, State, client, get, run, state  # noqa: F401
 
 REL = "2026/20261124-dance"
@@ -340,6 +340,58 @@ def test_wrong_setting_is_shown_on_the_page(box, monkeypatch):
     assert code == 1
     db = sqlite3.connect(box.db)
     assert "everything" in db.execute("SELECT error FROM heartbeat").fetchone()[0]
+    assert box.sent() == []
+
+
+def _run_main(box):
+    return incoming.main(
+        ["--root", str(box.root), "--staging", str(box.staging), "--db", str(box.db),
+         "--since", "2026-11-24", "--wait-hours", "0"]
+    )
+
+
+@pytest.mark.parametrize("value", [None, "", "ro"])
+def test_photos_access_read_only_leaves_the_nas_file(box, monkeypatch, value):
+    # Compose passes a blank when the setting is left out.
+    p = make_jpeg(box.folder / "DSC_1.JPG")
+    before = p.read_bytes()
+    if value is None:
+        monkeypatch.delenv("PHOTOS_ACCESS", raising=False)
+    else:
+        monkeypatch.setenv("PHOTOS_ACCESS", value)
+    assert _run_main(box) == 0
+    assert p.read_bytes() == before
+    assert box.sent() == ["DSC_1.JPG"]
+
+
+def test_photos_access_rw_strips_the_nas_file_too(box, monkeypatch):
+    p = make_jpeg(box.folder / "DSC_1.JPG")
+    monkeypatch.setenv("PHOTOS_ACCESS", "rw")
+    assert _run_main(box) == 0
+    assert p.read_bytes() == (box.staging / "DSC_1.JPG").read_bytes()
+    assert not has_mpf(p)
+
+
+def test_photos_access_rw_on_a_read_only_share_is_shown_and_nothing_sent(box, monkeypatch):
+    # A file by file failure would hide that the mount or the NAS rule is wrong.
+    make_jpeg(box.folder / "DSC_1.JPG")
+    monkeypatch.setenv("PHOTOS_ACCESS", "rw")
+    real = os.access
+    monkeypatch.setattr(
+        incoming.os, "access", lambda p, mode, **k: False if mode & os.W_OK else real(p, mode, **k)
+    )
+    assert _run_main(box) == 1
+    db = sqlite3.connect(box.db)
+    assert "PHOTOS_ACCESS" in db.execute("SELECT error FROM heartbeat").fetchone()[0]
+    assert box.sent() == []
+
+
+def test_photos_access_unknown_value_is_shown(box, monkeypatch):
+    make_jpeg(box.folder / "DSC_1.JPG")
+    monkeypatch.setenv("PHOTOS_ACCESS", "yes")
+    assert _run_main(box) == 1
+    db = sqlite3.connect(box.db)
+    assert "PHOTOS_ACCESS" in db.execute("SELECT error FROM heartbeat").fetchone()[0]
     assert box.sent() == []
 
 

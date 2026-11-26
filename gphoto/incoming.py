@@ -771,6 +771,14 @@ def wait(runner: Runner, seconds: float) -> None:
             return
 
 
+def _photos_access() -> str:
+    """PHOTOS_ACCESS: ro sends a cleaned copy, rw cleans the NAS file too. Blank is ro."""
+    access = os.getenv("PHOTOS_ACCESS", "").strip() or "ro"
+    if access not in ("ro", "rw"):
+        raise ValueError(f"PHOTOS_ACCESS must be ro or rw, not {access!r}")
+    return access
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, required=True, help="photo folder on the NAS")
@@ -797,6 +805,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         settings = scrub.from_env()
+        runner.in_place = args.in_place or _photos_access() == "rw"
+        if runner.in_place and not os.access(args.root, os.W_OK):
+            raise ValueError(
+                f"PHOTOS_ACCESS is rw but {args.root} cannot be written."
+                " Check the mount and the NAS permissions"
+            )
     except ValueError as error:
         # Shown on the page, because a container that keeps stopping says nothing there.
         logger.error("%s", error)

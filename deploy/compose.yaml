@@ -63,8 +63,9 @@ services:
       - TZ=${TZ:?}
       - SCRUB=${SCRUB:-}
       - CAMERAS=${CAMERAS:-}
+      - PHOTOS_ACCESS=${PHOTOS_ACCESS:-}
     volumes:
-      - ${PHOTOS:?}:/photos:ro
+      - ${PHOTOS:?}:/photos:${PHOTOS_ACCESS:-ro}
       - ./staging:/staging
       - ./state:/state
       - ./requests:/requests

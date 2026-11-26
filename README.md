@@ -13,7 +13,7 @@ Copy camera photos to the NAS. About 4 hours later they are in Google Photos, sh
 
 | Container | Job | Can reach |
 |---|---|---|
-| `gphoto-incoming` | Finds photos, waits, strips a copy, puts it in `staging` | NAS read-only, no network |
+| `gphoto-incoming` | Finds photos, waits, strips a copy, puts it in `staging` | NAS read-only unless `PHOTOS_ACCESS=rw`, no network |
 | `gphoto-chrome` | Google Photos, signed in, watching `staging` | Internet, LAN desktop on port 3941 |
 | `gphoto-google` | Checks Chrome, proves arrival, tidies `staging` | Chrome by a socket file, no network |
 | `gphoto-web` | Status page, history, ops. The only one that can export telemetry | State read-only |
@@ -35,7 +35,7 @@ NFS does not report changes made by other machines, so it polls every 5 minutes.
 
 ## What "In Google" means
 
-Google Photos showed a photo at that capture second. A phone photo in the same second can stand in for it. Staged copies are removed 30 days after that, and only while nothing is missing. NAS files are never changed.
+Google Photos showed a photo at that capture second. A phone photo in the same second can stand in for it. Staged copies are removed 30 days after that, and only while nothing is missing. NAS files are changed only with `PHOTOS_ACCESS=rw`.
 
 ## Settings
 
@@ -46,10 +46,13 @@ All in `.env`. Run `docker compose up -d` after a change.
 | `PHOTOS`, `SINCE`, `WAIT_HOURS` | Share to watch, first day, time to delete bad shots |
 | `CAMERAS` | Makes to send. Default `NIKON` |
 | `SCRUB` | What to take out of the sent copy. Default `mpf` |
+| `PHOTOS_ACCESS` | `rw` cleans the NAS file too. Default `ro` |
 | `SITE_HOST`, `ALLOWED_EMAIL`, `CF_ACCESS_*` | The page, and the one person let in |
 | `LAN_ADDRESS`, `CHROME_*` | The Chrome desktop |
 
 `SCRUB` groups: `mpf` (the preview that stops Google shrinking), `serial` (serial numbers and shutter count, which takes all maker notes with it), `gps`, `previews`, `names` (artist, copyright, owner, comments), `maker`. Capture time, time zone, rotation, colour, make and model can never be removed. If anything outside the listed groups would change, the photo is not sent and is shown as failed. Changing `SCRUB` changes the bytes, so a photo sent again after a change appears twice in Google.
+
+`PHOTOS_ACCESS=rw` cleans a camera photo on the NAS in the same way, when it is due to go. The NAS file then has the same bytes as the copy Google has. Phone photos and photos sent before are left alone. The capture time and the file's modified time are kept. The share must be writable by this host only: give it its own NFS rule and user, not the rule other machines use. If it cannot be written, nothing is sent and the page says so.
 
 One install is for one person.
 
