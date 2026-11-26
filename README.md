@@ -35,7 +35,7 @@ NFS does not report changes made by other machines, so it polls every 5 minutes.
 
 ## What "In Google" means
 
-Google Photos showed a photo at that capture second. A phone photo in the same second can stand in for it. Staged copies are removed 30 days after that, and only while nothing is missing. NAS files are changed only with `PHOTOS_ACCESS=rw`.
+Google Photos showed a photo at that capture second. A phone photo in the same second can stand in for it. Staged copies are removed 30 days after that. A photo that never arrives keeps its own copy and does not hold the others back. Dismiss it, or send it again. NAS files are changed only with `PHOTOS_ACCESS=rw`.
 
 ## Settings
 
@@ -60,12 +60,23 @@ One install is for one person.
 
 Numbers are kept in memory and shown on the Ops page. To export, copy `.env.otel.example` to `.env.otel`. Only the standard `OTEL_` variables are used, over OTLP http/protobuf. Each photo is one trace. Photo paths are left out unless `OTEL_GPHOTO_PATHS=true`. If the collector is down, photos are not affected, and what happened meanwhile may not be exported.
 
+## Watching it
+
+The page goes red and says what to do. Nothing is sent to you. For a monitor:
+
+| Address | Answers |
+|---|---|
+| `/healthz` | `ok` while the page is up. Docker's health check. Never fails for a Google problem, because a restart does not sign Google back in |
+| `/readyz` | `ok`, or `503` and `needs you:` with the steps in trouble, such as `chrome`. No sign-in needed, so it never names a photo |
+
+Disk space under 2 GB on the Docker host is a problem on the page.
+
 ## What is kept
 
 | What | How long |
 |---|---|
 | Container logs | 3 files of 10 MB each |
-| History | 90 days |
+| History | 90 days, 100 a page |
 | Database backups in `state/backup` | 7 days |
 | Staged copies | 30 days after they are seen in Google |
 | Charts on the Ops page | A day, in memory |

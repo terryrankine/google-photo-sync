@@ -142,7 +142,9 @@ def facts(
         if not snapshot:
             return "not known"
         hours = max(0, now - snapshot["started"]) / 3600
-        return f"{hours / 24:.0f} days" if hours >= 48 else f"{hours:.0f} hours"
+        if hours >= 48:
+            return f"{hours / 24:.0f} days"
+        return "1 hour" if round(hours) == 1 else f"{hours:.0f} hours"
 
     def outcome(kind: str) -> str:
         return number(i("gphoto.photos", outcome=kind) or 0)

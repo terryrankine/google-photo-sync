@@ -504,7 +504,8 @@ def test_nothing_is_tidied_while_the_folder_is_not_allowed(g):
     assert g.staged.exists()
 
 
-def test_nothing_is_tidied_while_a_photo_is_missing(g):
+def test_a_missing_photo_does_not_hold_back_the_tidy(g):
+    # One photo Google never takes would otherwise fill the disk. The NAS keeps the original.
     g.chrome.labels[g.day] = g.there
     c = g.checker()
     run(c.tick())
@@ -513,7 +514,8 @@ def test_nothing_is_tidied_while_a_photo_is_missing(g):
     g.box.runner().tick()
     g.box.clock.now += 60 * DAY
     run(c.tick())
-    assert g.staged.exists()
+    assert not g.staged.exists()
+    assert (g.box.staging / "DSC_2.JPG").exists()
 
 
 # --- the page ------------------------------------------------------------------------

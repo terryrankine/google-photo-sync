@@ -1,9 +1,11 @@
 {% extends "base.html" %}
 {% block body %}
+  {% set base = "/history?path=" ~ (path|urlencode) ~ ("&trouble=true" if trouble else "") %}
   <h1>History</h1>
   <p class="beat">{% if path %}{{ path }}. <a href="/history">Show everything</a>
     {% elif trouble %}Trouble only. <a href="/history">Show everything</a>
-    {% else %}The last 300 things, kept for 90 days. <a href="/history?trouble=true">Show trouble only</a>{% endif %}</p>
+    {% else %}Newest first, kept for 90 days. <a href="/history?trouble=true">Show trouble only</a>{% endif %}
+    {% if after %}<a href="{{ base }}">Newest</a>{% endif %}</p>
   <div class="panel scroll" style="margin-top: 1.25rem">
   {% if events %}
   <table>
@@ -20,4 +22,7 @@
   </table>
   {% else %}<p class="empty">Nothing has happened yet.</p>{% endif %}
   </div>
+  {% if older %}
+  <p class="pager"><a class="older" href="{{ base }}&after={{ older|urlencode }}">Older</a></p>
+  {% endif %}
 {% endblock %}

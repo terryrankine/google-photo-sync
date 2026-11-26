@@ -9,10 +9,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from gphoto import metrics
+
 PASS_STALE = 15 * 60
 CHECK_STALE = 10 * 60
 ARRIVAL_LATE = 2 * 3600
 WAITING_LATE = 3600
+LOW_DISK = 2e9  # about 200 photos of staging
 CLOCK_SLACK = 5 * 60
 RECENT = 200
 
@@ -122,6 +125,24 @@ def _google_problems(health: sqlite3.Row | None, now: float) -> list[Problem]:
             )
         )
     return problems
+
+
+def _disk_problems(state: Path) -> list[Problem]:
+    """Said early. A full disk otherwise shows only as photos overdue, hours later."""
+    saved = metrics.load(state, "incoming")
+    free = [
+        v for v in (metrics.value(saved, "gphoto.disk.free", mount=m) for m in ("state", "staging"))
+        if v is not None
+    ]
+    if not free or min(free) >= LOW_DISK:
+        return []
+    return [
+        Problem(
+            f"Disk space is low on the Docker host: {min(free) / 1e9:.1f} GB free",
+            "Free some space. Photos wait while it is full and go by themselves after.",
+            "staging",
+        )
+    ]
 
 
 def _some(count: int, one: str, many: str) -> str:
@@ -248,7 +269,8 @@ def read(state: Path, now: float, wait_seconds: float) -> Status:
         db.close()
     return Status(
         now=now,
-        problems=_tool_problems(beat, now) + _google_problems(health, now) + photo_problems,
+        problems=_tool_problems(beat, now) + _google_problems(health, now) + photo_problems
+        + _disk_problems(state),
         counts=counts,
         photos=photos,
         last_pass=beat["at"] if beat else None,

@@ -376,13 +376,11 @@ class Checker:
             self._reload_delay = min(self._reload_delay * 2, RELOAD_MOST)
 
     def _tidy(self) -> None:
-        """Remove old staged copies. The NAS is not involved.
+        """Remove staged copies a month after they were seen. The NAS is not involved.
 
-        Proof of arrival is a matching second, so it is only trusted for this after a
-        month in which nothing is missing.
+        A photo that is still missing does not hold the others back. Its own copy stays,
+        and any copy can be made again from the NAS with Send again.
         """
-        if self._db.execute(f"SELECT 1 {self._OUTSTANDING} LIMIT 1").fetchone():
-            return
         now = self.clock()
         old = self._db.execute(
             "SELECT i.path, i.staged, i.sha1, c.at FROM confirmed c CROSS JOIN inc.incoming i"

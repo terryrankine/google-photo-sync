@@ -63,7 +63,7 @@
       <td class="wide">{{ when(p.landed) }}</td>
       <td>{% if can_ask and p.stage in ("failed", "needs a look", "on the way") %}
         <form method="post" action="/photo"><input type="hidden" name="path" value="{{ path }}"><button name="action" value="retry">Send again</button></form>
-        {% if p.stage != "on the way" %}<form method="post" action="/photo"><input type="hidden" name="path" value="{{ path }}"><button name="action" value="dismiss">Dismiss</button></form>{% endif %}
+        <form method="post" action="/photo"><input type="hidden" name="path" value="{{ path }}"><button name="action" value="dismiss">Dismiss</button></form>
       {% endif %}</td>
     </tr>
     {% endfor %}

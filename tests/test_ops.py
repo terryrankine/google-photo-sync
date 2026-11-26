@@ -9,7 +9,7 @@ from datetime import datetime
 
 import pytest
 
-from gphoto import events, google, incoming, metrics, ops, scrub, status
+from gphoto import charts, events, google, incoming, metrics, ops, scrub, status
 from tests.test_faults import checker_on, rows
 from tests.test_incoming import HOUR, Box, has_mpf, make_jpeg
 from tests.test_product import DAY, MIN, NOW, Google, State, client, get, run, state  # noqa: F401
@@ -663,3 +663,123 @@ def test_export_is_stopped_with_the_page(state):  # noqa: F811
 def test_checker_on_is_used(state):  # noqa: F811
     run(checker_on(state).tick())
     assert "started" in kinds(state.dir / "google.db")
+
+
+# --- review 2026-11-26 ----------------------------------------------------------------
+
+
+def test_photo_on_the_way_can_be_dismissed_on_the_page(client, state):  # noqa: F811
+    state.photo("w.JPG", sent_at=NOW - 3 * HOUR)
+    page = get(client).text
+    assert 'value="dismiss"' in page
+
+
+def test_dismissed_photo_is_no_longer_on_the_way_or_late(state):  # noqa: F811
+    state.photo("w.JPG", sent_at=NOW - 3 * HOUR, landed=NOW - 7 * HOUR)
+    before = state.read()
+    assert before.counts["on the way"] == 1
+    assert [p for p in before.problems if "arrived" in p.title]
+    state._do("incoming.db", "UPDATE incoming SET status = 'dismissed'")
+    after = state.read()
+    assert after.counts["on the way"] == 0
+    assert not [p for p in after.problems if "arrived" in p.title]
+
+
+def test_runner_dismisses_a_sent_photo(g):
+    assert g.box.runner().dismiss(f"{REL}/DSC_1.JPG")
+    assert rows(g.box)["DSC_1.JPG"]["status"] == "dismissed"
+
+
+def test_readyz_is_ok_when_the_page_is_green(client, state):  # noqa: F811
+    r = client.get("/readyz")
+    assert (r.status_code, r.text) == (200, "ok")
+
+
+def test_readyz_fails_when_the_page_says_needs_you(client, state):  # noqa: F811
+    state.health(signed_in=0)
+    r = client.get("/readyz")
+    assert r.status_code == 503
+    assert r.text == "needs you: chrome"
+
+
+def test_readyz_names_areas_only_never_paths(client, state):  # noqa: F811
+    # It answers without a sign-in, so it must not show family folder names.
+    state.photo("f.JPG", "failed")
+    r = client.get("/readyz")
+    assert r.status_code == 503
+    assert "folder" not in r.text and "JPG" not in r.text
+
+
+def test_healthz_stays_ok_when_the_page_says_needs_you(client, state):  # noqa: F811
+    # autoheal restarts an unhealthy container, which would not sign Google back in.
+    state.health(signed_in=0)
+    assert client.get("/healthz").status_code == 200
+
+
+def _many_events(state, count):  # noqa: F811
+    for n in range(count):
+        state.event("incoming.db" if n % 2 else "google.db", NOW - (n // 4), "sent", f"p{n}")
+
+
+def test_history_pages_cover_everything_once_in_order(state):  # noqa: F811
+    # Several events share one second, and come from both databases.
+    _many_events(state, 250)
+    seen, after = [], None
+    for _ in range(10):
+        found, after = events.page(state.dir, 100, after=after)
+        seen += found
+        if after is None:
+            break
+    paths = [e.path for e in seen if e.kind == "sent"]
+    assert sorted(paths) == sorted(f"p{n}" for n in range(250))
+    assert len(paths) == 250
+    assert [e.at for e in seen] == sorted((e.at for e in seen), reverse=True)
+
+
+def test_history_page_has_older_link_that_works(client, state):  # noqa: F811
+    _many_events(state, 250)
+    first = get(client, "/history").text
+    assert "Older" in first
+    link = first.split('class="older" href="')[1].split('"')[0].replace("&amp;", "&")
+    second = get(client, link)
+    assert second.status_code == 200
+    assert "Newest" in second.text
+
+
+def test_history_older_link_keeps_the_filter(client, state):  # noqa: F811
+    for n in range(150):
+        state.event("google.db", NOW - n, "signed_out")
+    page = get(client, "/history?trouble=true").text
+    assert "trouble=true" in page.split('class="older" href="')[1].split('"')[0]
+
+
+def test_bad_history_cursor_shows_the_newest(client, state):  # noqa: F811
+    assert get(client, "/history?after=rubbish").status_code == 200
+
+
+def _disk(state, free):  # noqa: F811
+    m = metrics.Metrics("incoming", state.dir, clock=lambda: NOW, version="t")
+    m.set("gphoto.disk.free", free, "By", "Free", mount="state")
+    m.save()
+
+
+def test_low_disk_is_a_problem(state):  # noqa: F811
+    _disk(state, 1.5e9)
+    s = state.read()
+    low = [p for p in s.problems if "disk" in p.title.lower()]
+    assert len(low) == 1 and low[0].area == "staging"
+    assert "1.5 GB" in low[0].title
+
+
+@pytest.mark.parametrize("free", [50e9, None])
+def test_enough_or_unknown_disk_is_not_a_problem(state, free):  # noqa: F811
+    if free is not None:
+        _disk(state, free)
+    assert not [p for p in state.read().problems if "disk" in p.title.lower()]
+
+
+@pytest.mark.parametrize("hours, words", [(1, "1 hour"), (5, "5 hours"), (72, "3 days")])
+def test_up_for_wording(tmp_path, hours, words):
+    snapshot = {"started": NOW - hours * HOUR, "metrics": {}}
+    found = dict(charts.facts(tmp_path, {"incoming": snapshot, "google": None}, NOW, 4 * HOUR))
+    assert dict(found["Versions"])["NAS check up for"] == words

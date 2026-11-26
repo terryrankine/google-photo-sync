@@ -29,6 +29,7 @@ from gphoto import charts, events, metrics, ops, otel, status
 logger = logging.getLogger(__name__)
 
 TOKEN_HEADER = "Cf-Access-Jwt-Assertion"
+HISTORY_PAGE = 100
 REQUIRED = ("CF_ACCESS_TEAM", "CF_ACCESS_AUD", "ALLOWED_EMAIL")
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
@@ -118,7 +119,16 @@ def create_app(
     @app.middleware("http")
     async def only_allowed(request: Request, call_next):
         if request.url.path == "/healthz":
+            # Only that this page is up. autoheal restarts an unhealthy container, and a
+            # restart does not sign Google back in.
             return PlainTextResponse("ok")
+        if request.url.path == "/readyz":
+            # For a monitor. Answers without a sign-in, so it names areas, never photos.
+            s = await anyio.to_thread.run_sync(current)
+            if s.ok:
+                return PlainTextResponse("ok")
+            areas = ",".join(dict.fromkeys(p.area for p in s.problems))
+            return PlainTextResponse(f"needs you: {areas}", status_code=503)
         # Key lookup can reach out to Cloudflare, so it must not block the loop.
         token = request.headers.get(TOKEN_HEADER)
         if not await anyio.to_thread.run_sync(access.allows, token):
@@ -156,10 +166,11 @@ def create_app(
         )
 
     @app.get("/history")
-    def history(path: str = "", trouble: bool = False) -> HTMLResponse:
-        found = events.history(state, 300, path[:1000] or None, trouble)
-        return render("history.html", current(), here="history", events=found, path=path[:1000],
-                      trouble=trouble)
+    def history(path: str = "", trouble: bool = False, after: str = "") -> HTMLResponse:
+        path, after = path[:1000], after[:100]
+        found, older = events.page(state, HISTORY_PAGE, path or None, trouble, after or None)
+        return render("history.html", current(), here="history", events=found, path=path,
+                      trouble=trouble, after=after, older=older)
 
     @app.get("/ops")
     def operations() -> HTMLResponse:
